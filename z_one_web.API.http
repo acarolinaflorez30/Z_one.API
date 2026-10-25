@@ -1,0 +1,6 @@
+@z_one_web.API_HostAddress = http://localhost:5102
+
+GET {{z_one_web.API_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
