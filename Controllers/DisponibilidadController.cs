@@ -19,3 +19,4 @@ public sealed class DisponibilidadController(IAlquileresService servicio) : Cont
         long id, [FromQuery] DateTimeOffset desde, [FromQuery] DateTimeOffset hasta, CancellationToken ct) =>
         servicio.DisponibilidadAsync(id, desde, hasta, ct);
 }
+

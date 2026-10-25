@@ -13,6 +13,7 @@ public interface ICatalogoService
     Task<SalaDto> ActualizarSalaAsync(long id, SalaRequest r, Guid adminId, ContextoPeticion ctx, CancellationToken ct);
     Task<IReadOnlyList<ServicioDto>> ListarServiciosAsync(bool soloActivos, CancellationToken ct);
     Task<ServicioDto> ActualizarServicioAsync(long id, ServicioRequest r, Guid adminId, ContextoPeticion ctx, CancellationToken ct);
+    Task<PaginaDto<HistorialPrecioDto>> ListarHistorialPreciosAsync(string? tabla, long? registroId, int pagina, int tamano, CancellationToken ct);
 }
 
 public sealed class CatalogoService(ZOneDbContext db, IAuditoriaService auditoria, TimeProvider time) : ICatalogoService
@@ -111,5 +112,34 @@ public sealed class CatalogoService(ZOneDbContext db, IAuditoriaService auditori
             new { antes, despues = new { servicio.Nombre, servicio.Precio, servicio.Activo } }, ctx.Ip);
         await db.SaveChangesAsync(ct);
         return Mapear(servicio);
+    }
+
+    // ───────────────────────── Historial de precios (lo llena la base de datos) ─────────────────────────
+
+    public async Task<PaginaDto<HistorialPrecioDto>> ListarHistorialPreciosAsync(
+        string? tabla, long? registroId, int pagina, int tamano, CancellationToken ct)
+    {
+        pagina = Math.Max(1, pagina);
+        tamano = Math.Clamp(tamano, 1, 100);
+        var consulta = db.HistorialPrecios.AsNoTracking().AsQueryable();
+
+        if (!string.IsNullOrWhiteSpace(tabla))
+        {
+            var t = tabla.Trim().ToLowerInvariant();
+            if (t != "salas" && t != "servicios")
+                throw ApiException.Validacion("tabla", "La tabla debe ser salas o servicios.");
+            consulta = consulta.Where(h => h.Tabla == t);
+        }
+        if (registroId is { } id) consulta = consulta.Where(h => h.RegistroId == id);
+
+        var total = await consulta.CountAsync(ct);
+        var filas = await consulta
+            .OrderByDescending(h => h.CambiadoEn).ThenByDescending(h => h.Id)
+            .Skip((pagina - 1) * tamano).Take(tamano)
+            .ToListAsync(ct);
+
+        return new PaginaDto<HistorialPrecioDto>(
+            filas.Select(h => new HistorialPrecioDto(h.Id, h.Tabla, h.RegistroId, h.Nombre, h.PrecioAnterior, h.PrecioNuevo, h.CambiadoEn)).ToList(),
+            total, pagina, tamano);
     }
 }

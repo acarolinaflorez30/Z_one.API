@@ -29,6 +29,8 @@ public sealed class Sesion
 
     public Sala Sala { get; set; } = null!;
     public Cliente? Cliente { get; set; }
+    public Proyecto? Proyecto { get; set; }
+    public List<AceptacionSesion> Aceptaciones { get; set; } = [];
 }
 
 /// <summary>Cobro pendiente o pagado. El sistema solo REGISTRA el pago; no procesa dinero.</summary>

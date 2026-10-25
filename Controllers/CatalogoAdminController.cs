@@ -29,6 +29,13 @@ public sealed class CatalogoAdminController(ICatalogoService catalogo) : Control
     public Task<IReadOnlyList<ServicioDto>> Servicios(CancellationToken ct) =>
         catalogo.ListarServiciosAsync(soloActivos: false, ct);
 
+    /// <summary>Todos los cambios de tarifa de salas y servicios, del más reciente al más antiguo.</summary>
+    [HttpGet("precios/historial")]
+    public Task<PaginaDto<HistorialPrecioDto>> HistorialPrecios(
+        [FromQuery] string? tabla, [FromQuery] long? registroId,
+        [FromQuery] int pagina = 1, [FromQuery] int tamano = 50, CancellationToken ct = default) =>
+        catalogo.ListarHistorialPreciosAsync(tabla, registroId, pagina, tamano, ct);
+
     [HttpPut("servicios/{id:long}")]
     public Task<ServicioDto> ActualizarServicio(long id, ServicioRequest request, CancellationToken ct) =>
         catalogo.ActualizarServicioAsync(id, request, AdminId, this.Contexto(), ct);

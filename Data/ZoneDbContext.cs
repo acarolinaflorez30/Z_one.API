@@ -1,7 +1,6 @@
-using Microsoft.EntityFrameworkCore;
 using System.Text;
+using Microsoft.EntityFrameworkCore;
 using ZOne.Api.Domain;
-using static System.Collections.Specialized.BitVector32;
 
 namespace ZOne.Api.Data;
 
@@ -23,6 +22,11 @@ public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbC
     public DbSet<ColaboradorNota> ColaboradorNotas => Set<ColaboradorNota>();
     public DbSet<Sesion> Sesiones => Set<Sesion>();
     public DbSet<Orden> Ordenes => Set<Orden>();
+    public DbSet<Proyecto> Proyectos => Set<Proyecto>();
+    public DbSet<HistorialPrecio> HistorialPrecios => Set<HistorialPrecio>();
+    public DbSet<ParticipanteProyecto> Participantes => Set<ParticipanteProyecto>();
+    public DbSet<AceptacionSesion> Aceptaciones => Set<AceptacionSesion>();
+    public DbSet<ComentarioRevision> ComentariosRevision => Set<ComentarioRevision>();
 
     protected override void OnModelCreating(ModelBuilder mb)
     {
@@ -38,6 +42,10 @@ public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbC
         mb.HasPostgresEnum<EstadoSesion>("estado_sesion");
         mb.HasPostgresEnum<EstadoOrden>("estado_orden");
         mb.HasPostgresEnum<ConceptoOrden>("concepto_orden");
+        mb.HasPostgresEnum<TipoProyecto>("tipo_proyecto");
+        mb.HasPostgresEnum<EstadoProyecto>("estado_proyecto");
+        mb.HasPostgresEnum<EstadoParticipacion>("estado_participacion");
+        mb.HasPostgresEnum<RolParticipante>("rol_participante");
 
         mb.Entity<Usuario>(e =>
         {
@@ -75,6 +83,7 @@ public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbC
             e.HasOne<Usuario>().WithMany().HasForeignKey(x => x.UsuarioId);
         });
 
+        mb.Entity<HistorialPrecio>(e => { e.ToTable("historial_precios"); e.HasKey(x => x.Id); });
         mb.Entity<Sala>(e => { e.ToTable("salas"); e.HasKey(x => x.Id); });
         mb.Entity<Servicio>(e => { e.ToTable("servicios"); e.HasKey(x => x.Id); });
 
@@ -99,6 +108,7 @@ public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbC
             e.HasKey(x => x.Id);
             e.HasOne(x => x.Sala).WithMany().HasForeignKey(x => x.SalaId);
             e.HasOne(x => x.Cliente).WithMany().HasForeignKey(x => x.ClienteId);
+            e.HasOne(x => x.Proyecto).WithMany().HasForeignKey(x => x.ProyectoId);
         });
 
         mb.Entity<Orden>(e =>
@@ -107,6 +117,39 @@ public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbC
             e.HasKey(x => x.Id);
             e.HasOne(x => x.Sesion).WithMany().HasForeignKey(x => x.SesionId);
             e.HasOne<Cliente>().WithMany().HasForeignKey(x => x.ClienteId);
+            e.HasOne<Proyecto>().WithMany().HasForeignKey(x => x.ProyectoId);
+        });
+
+        mb.Entity<Proyecto>(e =>
+        {
+            e.ToTable("proyectos");
+            e.HasKey(x => x.Id);
+            e.HasOne(x => x.Cliente).WithMany().HasForeignKey(x => x.ClienteId);
+            e.HasOne(x => x.Servicio).WithMany().HasForeignKey(x => x.ServicioId);
+            e.HasMany(x => x.Participantes).WithOne(x => x.Proyecto).HasForeignKey(x => x.ProyectoId);
+        });
+
+        mb.Entity<ParticipanteProyecto>(e =>
+        {
+            e.ToTable("participantes_proyecto");
+            e.HasKey(x => x.Id);
+            e.HasOne(x => x.Colaborador).WithMany().HasForeignKey(x => x.ColaboradorId);
+        });
+
+        mb.Entity<AceptacionSesion>(e =>
+        {
+            e.ToTable("aceptaciones_sesion");
+            e.HasKey(x => new { x.SesionId, x.UsuarioId });
+            e.HasOne(x => x.Sesion).WithMany(s => s.Aceptaciones).HasForeignKey(x => x.SesionId);
+            e.HasOne(x => x.Usuario).WithMany().HasForeignKey(x => x.UsuarioId);
+        });
+
+        mb.Entity<ComentarioRevision>(e =>
+        {
+            e.ToTable("comentarios_revision");
+            e.HasKey(x => x.Id);
+            e.HasOne<Proyecto>().WithMany().HasForeignKey(x => x.ProyectoId);
+            e.HasOne<Usuario>().WithMany().HasForeignKey(x => x.AutorId);
         });
 
         // Las columnas de la base están en snake_case (PasswordHash -> password_hash).

@@ -44,3 +44,15 @@ public sealed class ColaboradorNota
     public string Comentario { get; set; } = "";
     public DateTimeOffset CreadoEn { get; set; }
 }
+
+/// <summary>Cada cambio de tarifa de una sala o de un servicio. Lo llena la base de datos automáticamente.</summary>
+public sealed class HistorialPrecio
+{
+    public long Id { get; set; }
+    public string Tabla { get; set; } = "";
+    public long RegistroId { get; set; }
+    public string Nombre { get; set; } = "";
+    public decimal? PrecioAnterior { get; set; }
+    public decimal? PrecioNuevo { get; set; }
+    public DateTimeOffset CambiadoEn { get; set; }
+}

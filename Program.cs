@@ -16,7 +16,7 @@ using ZOne.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Configuración 
+// Configuración
 builder.Services.AddOptions<JwtOptions>()
     .Bind(builder.Configuration.GetSection(JwtOptions.Section))
     .Validate(o => o.SigningKey.Length >= 32,
@@ -25,8 +25,9 @@ builder.Services.AddOptions<JwtOptions>()
 builder.Services.AddOptions<AuthOptions>().Bind(builder.Configuration.GetSection(AuthOptions.Section));
 builder.Services.AddOptions<StorageOptions>().Bind(builder.Configuration.GetSection(StorageOptions.Section));
 builder.Services.AddOptions<AlquilerOptions>().Bind(builder.Configuration.GetSection(AlquilerOptions.Section));
+builder.Services.AddOptions<ProyectoOptions>().Bind(builder.Configuration.GetSection(ProyectoOptions.Section));
 
-// ── Base de datos (PostgreSQL / Supabase, solo como base de datos) ─────────
+// Base de datos
 var connectionString = builder.Configuration.GetConnectionString("Default")
     ?? throw new InvalidOperationException(
         "Falta ConnectionStrings:Default (usa user-secrets o la variable de entorno ConnectionStrings__Default).");
@@ -45,9 +46,13 @@ builder.Services.AddDbContext<ZOneDbContext>(o => o.UseNpgsql(connectionString, 
     npg.MapEnum<EstadoSesion>("estado_sesion");
     npg.MapEnum<EstadoOrden>("estado_orden");
     npg.MapEnum<ConceptoOrden>("concepto_orden");
+    npg.MapEnum<TipoProyecto>("tipo_proyecto");
+    npg.MapEnum<EstadoProyecto>("estado_proyecto");
+    npg.MapEnum<EstadoParticipacion>("estado_participacion");
+    npg.MapEnum<RolParticipante>("rol_participante");
 }));
 
-// ── Almacenamiento de fotos: Supabase Storage por protocolo S3 ─────────────
+// Almacenamiento de fotos: Supabase Storage por protocolo S3
 builder.Services.AddSingleton<IAmazonS3>(sp =>
 {
     var s = sp.GetRequiredService<IOptions<StorageOptions>>().Value;
@@ -64,7 +69,7 @@ builder.Services.AddSingleton<IAmazonS3>(sp =>
 });
 builder.Services.AddSingleton<IFotoStorage, S3FotoStorage>();
 
-// ── Servicios ──────────────────────────────────────────────────────────────
+//Servicios
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IPasswordHasher, Pbkdf2PasswordHasher>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
@@ -79,12 +84,16 @@ builder.Services.AddScoped<IColaboradoresService, ColaboradoresService>();
 builder.Services.AddScoped<IPublicoService, PublicoService>();
 builder.Services.AddScoped<ICatalogoService, CatalogoService>();
 builder.Services.AddScoped<IAlquileresService, AlquileresService>();
+builder.Services.AddScoped<IProyectosService, ProyectosService>();
+builder.Services.AddScoped<ISesionesProyectoService, SesionesProyectoService>();
+builder.Services.AddScoped<IOrdenesService, OrdenesService>();
+builder.Services.AddScoped<IAgendaService, AgendaService>();
 
 builder.Services.AddControllers();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
-// ── Autenticación: JWT leído desde cookie HttpOnly (o encabezado Authorization) ──
+// Autenticación: JWT leído desde cookie
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
 builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
     .Configure<IOptions<JwtOptions>>((o, jwtOptions) =>
@@ -117,7 +126,7 @@ builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationSc
     });
 builder.Services.AddAuthorization();
 
-// ── CORS: solo el origen del frontend, con cookies ─────────────────────────
+// CORS: solo el origen del frontend, con cookies
 var authOpciones = builder.Configuration.GetSection(AuthOptions.Section).Get<AuthOptions>() ?? new AuthOptions();
 var origenes = authOpciones.AllowedOrigins.Length > 0
     ? authOpciones.AllowedOrigins
@@ -129,7 +138,7 @@ builder.Services.AddCors(o => o.AddDefaultPolicy(p => p
     .WithHeaders("Content-Type", "Authorization", RequireCustomHeaderMiddleware.HeaderName)
     .WithMethods("GET", "POST", "PUT", "PATCH", "DELETE")));
 
-// ── Límite de peticiones por IP ────────────────────────────────────────────
+// Límite de peticiones por IP
 builder.Services.AddRateLimiter(o =>
 {
     o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -158,8 +167,17 @@ builder.Services.AddRateLimiter(o =>
 });
 
 // Solo se confía en proxies locales (loopback). Si despliegas detrás de un proxy, configura KnownProxies.
+// Detrás de un proveedor de hosting (que pone un proxy delante), activa Proxy:ConfiarEnReenviados.
+// Sin eso, todas las peticiones parecerían venir de la misma IP y el límite de peticiones afectaría a todos juntos.
 builder.Services.Configure<ForwardedHeadersOptions>(o =>
-    o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto);
+{
+    o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    if (builder.Configuration.GetValue<bool>("Proxy:ConfiarEnReenviados"))
+    {
+        o.KnownProxies.Clear();
+        o.KnownNetworks.Clear();
+    }
+});
 
 var app = builder.Build();
 

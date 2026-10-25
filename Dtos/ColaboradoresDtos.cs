@@ -79,3 +79,7 @@ public sealed record ServicioDto(
     long Id, string Codigo, string Nombre, string? Descripcion, string Categoria,
     string? Etapa, short SesionesIncluidas, decimal? Precio, bool Activo);
 public sealed record ServicioRequest(string Nombre, string? Descripcion, decimal? Precio, bool Activo = true);
+
+public sealed record HistorialPrecioDto(
+    long Id, string Tabla, long RegistroId, string Nombre,
+    decimal? PrecioAnterior, decimal? PrecioNuevo, DateTimeOffset CambiadoEn);
