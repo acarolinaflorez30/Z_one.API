@@ -11,12 +11,11 @@ namespace ZOne.Api.Services;
 public interface IProyectosService
 {
     Task<ProyectoDto> CrearAsync(CrearProyectoRequest r, Actor actor, ContextoPeticion ctx, CancellationToken ct);
-    Task<PaginaDto<ProyectoResumenDto>> ListarAsync(Actor actor, string? estado, int pagina, int tamano, CancellationToken ct);
+    Task<PaginaDto<ProyectoResumenDto>> ListarAsync(Actor actor, string? estado, bool? revisionVencida, int pagina, int tamano, CancellationToken ct);
     Task<ProyectoDto> ObtenerAsync(long id, Actor actor, CancellationToken ct);
     Task<ProyectoDto> AgregarParticipanteAsync(long id, ParticipanteRequest r, Actor actor, ContextoPeticion ctx, CancellationToken ct);
     Task<ProyectoDto> ContinuarAsync(long id, Actor actor, ContextoPeticion ctx, CancellationToken ct);
     Task<ProyectoDto> CancelarAsync(long id, Actor actor, ContextoPeticion ctx, CancellationToken ct);
-    Task<ProyectoDto> ListoParaRevisionAsync(long id, Actor actor, ContextoPeticion ctx, CancellationToken ct);
     Task<ProyectoDto> ComentarAsync(long id, string comentario, Actor actor, ContextoPeticion ctx, CancellationToken ct);
     Task<ProyectoDto> SolicitarAjustesAsync(long id, string? comentario, Actor actor, ContextoPeticion ctx, CancellationToken ct);
     Task<ProyectoDto> AprobarAsync(long id, Actor actor, ContextoPeticion ctx, CancellationToken ct);
@@ -29,6 +28,7 @@ public sealed class ProyectosService(
     ZOneDbContext db,
     IAuditoriaService auditoria,
     IOptions<ProyectoOptions> opciones,
+    INotificacionesService notificaciones,
     TimeProvider time) : IProyectosService
 {
     private readonly ProyectoOptions _o = opciones.Value;
@@ -67,6 +67,18 @@ public sealed class ProyectosService(
     {
         try { await db.SaveChangesAsync(ct); }
         catch (DbUpdateException ex) when (ErroresDb.Traducir(ex) is not null) { throw ErroresDb.Traducir(ex)!; }
+    }
+
+    /// <summary>
+    /// El cliente tiene 24 horas para aprobar o pedir ajustes. Pasado el plazo solo decide el administrador,
+    /// que puede hacerlo en cualquier momento.
+    /// </summary>
+    private void ValidarPlazoCliente(Proyecto p, Identidad yo)
+    {
+        if (yo.EsAdmin) return;
+        if (p.RevisionVenceEn is { } vence && vence <= time.GetUtcNow())
+            throw ApiException.Conflicto("plazo_vencido",
+                "El plazo de 24 horas para decidir venció. El administrador definirá el resultado.");
     }
 
     // ───────────────────────── Crear ─────────────────────────
@@ -192,7 +204,7 @@ public sealed class ProyectosService(
 
     // ───────────────────────── Consultas ─────────────────────────
 
-    public async Task<PaginaDto<ProyectoResumenDto>> ListarAsync(Actor actor, string? estado, int pagina, int tamano, CancellationToken ct)
+    public async Task<PaginaDto<ProyectoResumenDto>> ListarAsync(Actor actor, string? estado, bool? revisionVencida, int pagina, int tamano, CancellationToken ct)
     {
         pagina = Math.Max(1, pagina);
         tamano = Math.Clamp(tamano, 1, 100);
@@ -215,6 +227,13 @@ public sealed class ProyectosService(
             consulta = consulta.Where(p => p.Estado == estadoFiltro);
         }
 
+        // Revisiones cuyo plazo de 24 h venció sin respuesta del cliente: las decide el administrador.
+        if (revisionVencida == true)
+        {
+            var corte = time.GetUtcNow();
+            consulta = consulta.Where(p => p.Estado == EstadoProyecto.EnRevision && p.RevisionVenceEn <= corte);
+        }
+
         var total = await consulta.CountAsync(ct);
         var filas = await consulta
             .OrderByDescending(p => p.CreadoEn).ThenByDescending(p => p.Id)
@@ -231,14 +250,15 @@ public sealed class ProyectosService(
                 Cliente = p.Cliente.Nombre,
                 p.SesionesIncluidas,
                 p.CreadoEn,
-                Cumplidas = db.Sesiones.Count(s => s.ProyectoId == p.Id && !s.EsExtra && s.Estado == EstadoSesion.Cumplida)
+                p.RevisionVenceEn,
+                Cumplidas = db.Sesiones.Count(s => s.ProyectoId == p.Id && !s.EsExtra && s.Etapa != EtapaProyecto.Revision && s.Estado == EstadoSesion.Cumplida)
             })
             .ToListAsync(ct);
 
         var items = filas.Select(f => new ProyectoResumenDto(
             f.Id, f.Titulo, Convenciones.Api(f.Tipo), f.Servicio, Convenciones.Api(f.Estado),
             f.EtapaActual is null ? null : Convenciones.Api(f.EtapaActual.Value),
-            f.ClienteId, f.Cliente, f.SesionesIncluidas, f.Cumplidas, f.CreadoEn)).ToList();
+            f.ClienteId, f.Cliente, f.SesionesIncluidas, f.Cumplidas, f.CreadoEn, f.RevisionVenceEn)).ToList();
 
         return new PaginaDto<ProyectoResumenDto>(items, total, pagina, tamano);
     }
@@ -299,7 +319,11 @@ public sealed class ProyectosService(
             p.EtapaActual is null ? null : Convenciones.Api(p.EtapaActual.Value),
             p.ClienteId, p.Cliente.Nombre, p.PrecioAcordado, p.SesionesIncluidas, ReglasProyecto.Cumplidas(sesiones), p.RondaRevision,
             p.AprobadoEn, p.CanceladoEn, p.CreadoEn,
-            siguiente is { } sig ? new SiguienteSesionDto((short)sig.Numero, Convenciones.Api(sig.Etapa)) : null,
+            p.RevisionVenceEn,
+            p.Estado == EstadoProyecto.EnRevision && p.RevisionVenceEn is { } venceRevision && venceRevision <= ahora,
+            siguiente is { } sig
+                ? new SiguienteSesionDto(sig.Numero is { } numeroSig ? (short?)numeroSig : null, Convenciones.Api(sig.Etapa), sig.EsAjuste)
+                : null,
             ReglasProyecto.Creditos(ordenes, sesiones),
             participantes,
             sesiones.Select(s => ReglasProyecto.MapSesion(s, nombres, ahora)).ToList(),
@@ -509,35 +533,6 @@ public sealed class ProyectosService(
 
     // ───────────────────────── Revisión ─────────────────────────
 
-    /// <summary>El estudio (productor o administrador) avisa que el trabajo está listo para que el cliente lo revise.</summary>
-    public async Task<ProyectoDto> ListoParaRevisionAsync(long id, Actor actor, ContextoPeticion ctx, CancellationToken ct)
-    {
-        await LiberarVencidosAsync(ct);
-        var p = await CargarAsync(id, ct);
-        var yo = await AccesoAsync(p, actor, ct);
-        if (!yo.EsAdmin && !EsProductorAceptado(p, yo))
-            throw ApiException.Prohibido("Solo el productor del proyecto o el administrador marcan el trabajo como listo para revisión.");
-
-        if (p.Estado != EstadoProyecto.EnCurso)
-            throw ApiException.Conflicto("proyecto_no_en_curso", "El proyecto debe estar en curso.");
-
-        var sesiones = await db.Sesiones.AsNoTracking().Where(s => s.ProyectoId == id).ToListAsync(ct);
-        if (sesiones.Any(ReglasProyecto.Abierta))
-            throw ApiException.Conflicto("sesion_abierta", "Hay una sesión pendiente o confirmada que debe cumplirse o cancelarse primero.");
-
-        var trabajo = sesiones.Count(s => !s.EsExtra && s.Estado == EstadoSesion.Cumplida && s.Etapa != EtapaProyecto.Revision);
-        if (trabajo < ReglasProyecto.SesionesAntesDeRevision(p))
-            throw ApiException.Conflicto("faltan_sesiones", "Aún faltan sesiones de trabajo por cumplir.");
-        if (ReglasProyecto.AjustesPendientes(p, sesiones) > 0)
-            throw ApiException.Conflicto("faltan_ajustes", "Falta realizar la sesión de ajustes que pidió el cliente.");
-
-        p.Estado = EstadoProyecto.EnRevision;
-        p.ActualizadoEn = time.GetUtcNow();
-        auditoria.Registrar(actor.UsuarioId, "listo_para_revision", "proyecto", id.ToString(), null, ctx.Ip);
-        await GuardarAsync(ct);
-        return await ObtenerAsync(id, actor, ct);
-    }
-
     public async Task<ProyectoDto> ComentarAsync(long id, string comentario, Actor actor, ContextoPeticion ctx, CancellationToken ct)
     {
         var p = await CargarAsync(id, ct);
@@ -546,6 +541,7 @@ public sealed class ProyectosService(
 
         if (p.Estado != EstadoProyecto.EnRevision)
             throw ApiException.Conflicto("fuera_de_revision", "Solo se puede comentar mientras el proyecto está en revisión.");
+        ValidarPlazoCliente(p, yo);
 
         db.ComentariosRevision.Add(new ComentarioRevision
         {
@@ -561,8 +557,9 @@ public sealed class ProyectosService(
     }
 
     /// <summary>
-    /// El cliente pide ajustes. Si el paquete aún tiene la sesión de revisión, esa se usa;
-    /// si ya se gastó (o es un servicio parcial), se necesita una sesión extra pagada.
+    /// El cliente NO aprueba el trabajo (dentro de sus 24 h) y pide ajustes: se habilita la sesión de ajuste incluida.
+    /// Si esa ya se usó, otra ronda requiere una sesión extra pagada. Los servicios parciales no tienen ajustes.
+    /// El administrador puede hacerlo por el cliente, también después del plazo.
     /// </summary>
     public async Task<ProyectoDto> SolicitarAjustesAsync(long id, string? comentario, Actor actor, ContextoPeticion ctx, CancellationToken ct)
     {
@@ -572,10 +569,11 @@ public sealed class ProyectosService(
 
         if (p.Tipo == TipoProyecto.ServicioParcial)
             throw ApiException.Conflicto("sin_ajustes_en_parcial",
-                "Los servicios parciales se aprueban directamente: no tienen ronda de ajustes.");
+                "Los servicios parciales no tienen ronda de ajustes: terminan al cumplirse su sesión.");
 
         if (p.Estado != EstadoProyecto.EnRevision)
             throw ApiException.Conflicto("fuera_de_revision", "Solo se pueden pedir ajustes mientras el proyecto está en revisión.");
+        ValidarPlazoCliente(p, yo);
 
         var ahora = time.GetUtcNow();
         var texto = Entrada.TextoOpcional(comentario, "comentario", 2000);
@@ -593,14 +591,23 @@ public sealed class ProyectosService(
 
         p.RondaRevision++;
         p.Estado = EstadoProyecto.EnCurso;
+        p.RevisionVenceEn = null;
         p.EtapaActual = EtapaProyecto.Revision;
         p.ActualizadoEn = ahora;
+
         auditoria.Registrar(actor.UsuarioId, "ajustes_solicitados", "proyecto", id.ToString(), new { ronda = p.RondaRevision }, ctx.Ip);
+        await notificaciones.NotificarProyectoAsync(p, actor.UsuarioId,
+            Destinatarios.Colaboradores | Destinatarios.Administradores | (yo.EsAdmin ? Destinatarios.Cliente : Destinatarios.Ninguno),
+            "ajustes_solicitados", "Ajustes solicitados",
+            $"El trabajo de \"{p.Titulo}\" no fue aprobado: se habilita la sesión de ajuste.", null, ct);
         await GuardarAsync(ct);
         return await ObtenerAsync(id, actor, ct);
     }
 
-    /// <summary>Aprobar cierra el proyecto y bloquea los comentarios.</summary>
+    /// <summary>
+    /// Aprobar cierra el proyecto y bloquea los comentarios. El cliente lo hace dentro de sus 24 h;
+    /// si no responde, lo hace el administrador desde su panel.
+    /// </summary>
     public async Task<ProyectoDto> AprobarAsync(long id, Actor actor, ContextoPeticion ctx, CancellationToken ct)
     {
         var p = await CargarAsync(id, ct);
@@ -609,12 +616,20 @@ public sealed class ProyectosService(
 
         if (p.Estado != EstadoProyecto.EnRevision)
             throw ApiException.Conflicto("fuera_de_revision", "Solo se puede aprobar un proyecto que está en revisión.");
+        ValidarPlazoCliente(p, yo);
 
         var ahora = time.GetUtcNow();
         p.Estado = EstadoProyecto.Finalizado;
         p.AprobadoEn = ahora;
+        p.RevisionVenceEn = null;
         p.ActualizadoEn = ahora;
-        auditoria.Registrar(actor.UsuarioId, "proyecto_aprobado", "proyecto", id.ToString(), null, ctx.Ip);
+
+        auditoria.Registrar(actor.UsuarioId, "proyecto_aprobado", "proyecto", id.ToString(),
+            new { aprobadoPorAdministrador = yo.EsAdmin && !EsDueno(p, yo) }, ctx.Ip);
+        await notificaciones.NotificarProyectoAsync(p, actor.UsuarioId,
+            Destinatarios.Colaboradores | Destinatarios.Administradores | (yo.EsAdmin ? Destinatarios.Cliente : Destinatarios.Ninguno),
+            "proyecto_aprobado", "Trabajo aprobado",
+            $"\"{p.Titulo}\" quedó aprobado y finalizado.", null, ct);
         await GuardarAsync(ct);
         return await ObtenerAsync(id, actor, ct);
     }

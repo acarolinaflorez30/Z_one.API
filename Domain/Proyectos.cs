@@ -24,6 +24,8 @@ public sealed class Proyecto
     public short RondaRevision { get; set; }
     public DateTimeOffset? AprobadoEn { get; set; }
     public DateTimeOffset? CanceladoEn { get; set; }
+    /// <summary>Plazo de 24 h del cliente para aprobar o pedir ajustes. Solo tiene valor mientras el proyecto está en revisión.</summary>
+    public DateTimeOffset? RevisionVenceEn { get; set; }
     public Guid? CreadoPor { get; set; }
     public DateTimeOffset CreadoEn { get; set; }
     public DateTimeOffset ActualizadoEn { get; set; }

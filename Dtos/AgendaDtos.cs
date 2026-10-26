@@ -32,4 +32,6 @@ public sealed record AgendaResumenDto(
     int SesionesPorCerrar,
     int SolicitudesPendientes,
     int CobrosPendientes,
+    int RevisionesPorDecidir,       // cliente: trabajos que debe aprobar; administrador: revisiones cuyo plazo de 24 h venció sin respuesta
+    int NotificacionesSinLeer,
     AgendaItemDto? Proxima);

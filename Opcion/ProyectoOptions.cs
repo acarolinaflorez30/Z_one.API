@@ -17,6 +17,9 @@ public sealed class ProyectoOptions
     /// <summary>Si es true, la retención de una sesión termina al empezar la sesión si ocurre antes del plazo.</summary>
     public bool LiberarAlInicio { get; set; } = true;
 
+    /// <summary>Plazo del cliente para aprobar el trabajo de una canción completa (decidido: 24 h). Vencido, decide el administrador.</summary>
+    public int RevisionClienteHoras { get; set; } = 24;
+
     public int SesionMinMinutos { get; set; } = 60;
     public int SesionMaxMinutos { get; set; } = 480;
     public int GranularidadMinutos { get; set; } = 30;
@@ -26,6 +29,6 @@ public sealed class ProyectoOptions
     /// <summary>Tope de proyectos sin confirmar por cliente, para no saturar de solicitudes a los colaboradores.</summary>
     public int MaxProyectosPendientesPorCliente { get; set; } = 5;
 
-    /// <summary>Diferencia horaria local respecto a UTC (Colombia: -5, sin horario de verano). Define "el mismo día" al cumplir una sesión.</summary>
+    /// <summary>Diferencia horaria local respecto a UTC (Colombia: -5). Se usa para mostrar horas locales en los avisos. Ya no existe la regla de cumplir la sesión el mismo día.</summary>
     public int UtcOffsetHoras { get; set; } = -5;
 }

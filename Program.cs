@@ -88,6 +88,7 @@ builder.Services.AddScoped<IProyectosService, ProyectosService>();
 builder.Services.AddScoped<ISesionesProyectoService, SesionesProyectoService>();
 builder.Services.AddScoped<IOrdenesService, OrdenesService>();
 builder.Services.AddScoped<IAgendaService, AgendaService>();
+builder.Services.AddScoped<INotificacionesService, NotificacionesService>();
 
 builder.Services.AddControllers();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();

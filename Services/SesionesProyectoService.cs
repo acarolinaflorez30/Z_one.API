@@ -22,6 +22,7 @@ public sealed class SesionesProyectoService(
     ZOneDbContext db,
     IAuditoriaService auditoria,
     IOptions<ProyectoOptions> opciones,
+    INotificacionesService notificaciones,
     TimeProvider time) : ISesionesProyectoService
 {
     private readonly ProyectoOptions _o = opciones.Value;
@@ -115,6 +116,11 @@ public sealed class SesionesProyectoService(
 
         if (esExtra)
         {
+            // La sesión de ajuste incluida no se cobra: mientras esté disponible, no se gasta una extra.
+            if (ReglasProyecto.Siguiente(p, sesiones) is { EsAjuste: true })
+                throw ApiException.Conflicto("usa_ajuste_incluido",
+                    "La sesión de ajuste incluida todavía está disponible: prográmala sin marcarla como extra.");
+
             var ordenes = await db.Ordenes.AsNoTracking()
                 .Where(o => o.ProyectoId == p.Id && o.Concepto == ConceptoOrden.SesionExtra).ToListAsync(ct);
             if (ReglasProyecto.Creditos(ordenes, sesiones) <= 0)
@@ -126,7 +132,7 @@ public sealed class SesionesProyectoService(
         {
             var siguiente = ReglasProyecto.Siguiente(p, sesiones)
                 ?? throw ApiException.Conflicto("sin_sesion_disponible", MotivoSinSiguiente(p, sesiones));
-            numero = (short)siguiente.Numero;
+            numero = siguiente.Numero is { } numeroSiguiente ? (short?)numeroSiguiente : null;   // la sesión de ajuste no tiene número
             etapa = siguiente.Etapa;
         }
 
@@ -172,9 +178,13 @@ public sealed class SesionesProyectoService(
 
     private static string MotivoSinSiguiente(Proyecto p, IReadOnlyCollection<Sesion> sesiones)
     {
-        if (ReglasProyecto.Cumplidas(sesiones) >= p.SesionesIncluidas)
+        if (ReglasProyecto.Cumplidas(sesiones) >= ReglasProyecto.SesionesDelPaquete(p))
+        {
+            if (ReglasProyecto.AjustesPendientes(p, sesiones) > 0)
+                return "La sesión de ajuste incluida ya se usó. Para otra ronda de ajustes, solicita una sesión extra.";
             return "Ya se cumplieron todas las sesiones del paquete. Para más tiempo, solicita una sesión extra.";
-        return "Todavía no toca programar otra sesión: la de revisión solo se habilita cuando el cliente pide ajustes.";
+        }
+        return "Todavía no toca programar otra sesión.";
     }
 
     private void ValidarVentana(DateTimeOffset inicio, DateTimeOffset fin, DateTimeOffset ahora)
@@ -308,8 +318,13 @@ public sealed class SesionesProyectoService(
     // ───────────────────────── Cumplir: aquí se gasta la sesión del paquete ─────────────────────────
 
     /// <summary>
-    /// El productor o el administrador marcan la sesión como cumplida, con una breve reseña, el mismo día
-    /// y cuando termina su horario. Con eso se gasta la sesión del paquete y avanza la etapa del proyecto.
+    /// El productor (o el administrador) marca la sesión como terminada, con una breve reseña, cuando termina su horario.
+    /// Se avisa al cliente y al administrador. Con eso se gasta la sesión del paquete y avanza el proyecto:
+    ///  · Servicio parcial: queda finalizado. No hay revisión, aprobación ni ajustes.
+    ///  · Canción completa, sesiones 1 a 3: pasa a la siguiente etapa.
+    ///  · Canción completa, sesión 4 (o la de ajuste, si el cliente la pidió): pasa a revisión y el cliente tiene
+    ///    24 horas para aprobar o no. Si no responde, decide el administrador desde su panel.
+    ///  · Sesión extra de trabajo: solo se gasta; el proyecto sigue donde estaba.
     /// </summary>
     public async Task<SesionProyectoDto> CumplirAsync(long id, string resena, Actor actor, ContextoPeticion ctx, CancellationToken ct)
     {
@@ -327,32 +342,68 @@ public sealed class SesionesProyectoService(
         if (ahora < sesion.Fin)
             throw ApiException.Conflicto("sesion_en_curso", "La sesión se marca como cumplida cuando termina su horario.");
 
-        // "El mismo día": se compara la fecha local (Colombia) de ahora con la de la hora de fin.
-        var zona = TimeSpan.FromHours(_o.UtcOffsetHoras);
-        if (ahora.ToOffset(zona).Date != sesion.Fin.ToOffset(zona).Date)
-            throw ApiException.Conflicto("fuera_del_dia", "La sesión debe marcarse como cumplida el mismo día en que termina.");
-
         sesion.Estado = EstadoSesion.Cumplida;
         sesion.Resena = Entrada.Texto(resena, "resena", 5, 2000);
         sesion.CumplidaEn = ahora;
         sesion.CumplidaPor = actor.UsuarioId;
 
-        // Avance del proyecto: arranca al cumplirse la primera sesión y cada sesión del paquete mueve la etapa.
-        if (p.Estado == EstadoProyecto.Confirmado) p.Estado = EstadoProyecto.EnCurso;
-        if (!sesion.EsExtra && sesion.Etapa != EtapaProyecto.Revision && sesion.NumeroSesion is { } n)
+        // Estado de las sesiones del proyecto ya con ésta cumplida (todavía no se guardó).
+        var otras = await db.Sesiones.AsNoTracking().Where(s => s.ProyectoId == p.Id && s.Id != sesion.Id).ToListAsync(ct);
+        var todas = otras.Append(sesion).ToList();
+
+        var descripcionSesion = sesion.EsExtra ? "extra"
+            : sesion.Etapa == EtapaProyecto.Revision ? "de ajuste"
+            : sesion.NumeroSesion?.ToString() ?? "";
+
+        string tipoAviso = "sesion_cumplida";
+        string tituloAviso = "Sesión cumplida";
+        string mensajeAviso = $"Se cumplió la sesión {descripcionSesion} de \"{p.Titulo}\".";
+
+        if (p.Tipo == TipoProyecto.ServicioParcial)
         {
-            p.EtapaActual = n < ReglasProyecto.SesionesAntesDeRevision(p)
-                ? ReglasProyecto.EtapaDe(p, n + 1)
-                : EtapaProyecto.Revision;
+            // Un servicio parcial termina al cumplirse su única sesión: sin revisión ni ajustes.
+            p.Estado = EstadoProyecto.Finalizado;
+            tipoAviso = "servicio_finalizado";
+            tituloAviso = "Servicio finalizado";
+            mensajeAviso = $"La sesión de \"{p.Titulo}\" se cumplió y el servicio quedó finalizado.";
         }
-        else if (sesion.Etapa == EtapaProyecto.Revision)
+        else
         {
-            p.EtapaActual = EtapaProyecto.Revision;
+            if (p.Estado == EstadoProyecto.Confirmado) p.Estado = EstadoProyecto.EnCurso;
+
+            var abreRevision = false;
+            if (sesion.Etapa == EtapaProyecto.Revision)
+            {
+                // Terminó una sesión de ajuste (incluida o extra): vuelve a revisión cuando ya no queda ningún ajuste por hacer.
+                abreRevision = ReglasProyecto.AjustesPendientes(p, todas) <= 0;
+            }
+            else if (!sesion.EsExtra)
+            {
+                var hechas = ReglasProyecto.Cumplidas(todas);
+                if (hechas >= ReglasProyecto.SesionesDelPaquete(p)) abreRevision = true;          // terminó la 4.ª etapa
+                else p.EtapaActual = ReglasProyecto.EtapaDe(p, hechas + 1);                      // pasa a la siguiente etapa
+            }
+
+            if (abreRevision)
+            {
+                var vence = ahora.AddHours(_o.RevisionClienteHoras);
+                p.Estado = EstadoProyecto.EnRevision;
+                p.EtapaActual = EtapaProyecto.Revision;
+                p.RevisionVenceEn = vence;
+
+                var hora = vence.ToOffset(TimeSpan.FromHours(_o.UtcOffsetHoras)).ToString("dd/MM/yyyy HH:mm");
+                tipoAviso = "revision_pendiente";
+                tituloAviso = "Trabajo listo para revisión";
+                mensajeAviso = $"El trabajo de \"{p.Titulo}\" está listo. El cliente tiene hasta {hora} para aprobarlo o pedir ajustes; " +
+                               "si no responde, lo define el administrador.";
+            }
         }
         p.ActualizadoEn = ahora;
 
         auditoria.Registrar(actor.UsuarioId, "sesion_cumplida", "sesion", id.ToString(),
-            new { proyectoId = p.Id, numero = sesion.NumeroSesion, extra = sesion.EsExtra }, ctx.Ip);
+            new { proyectoId = p.Id, numero = sesion.NumeroSesion, extra = sesion.EsExtra, estadoProyecto = p.Estado.ToString() }, ctx.Ip);
+        await notificaciones.NotificarProyectoAsync(p, actor.UsuarioId, Destinatarios.Cliente | Destinatarios.Administradores,
+            tipoAviso, tituloAviso, mensajeAviso, id, ct);
         await GuardarAsync(ct);
         return await DtoAsync(id, p, yo, ct);
     }

@@ -28,13 +28,17 @@ public sealed record OrdenProyectoDto(
 
 public sealed record ComentarioRevisionDto(long Id, short Ronda, Guid AutorId, string Autor, string Comentario, DateTimeOffset CreadoEn);
 
-/// <summary>La sesión que corresponde programar ahora (numerada y con su etapa), o null si todavía no toca.</summary>
-public sealed record SiguienteSesionDto(short Numero, string Etapa);
+/// <summary>
+/// La sesión que corresponde programar ahora, o null si todavía no toca.
+/// Numero es null en la sesión de ajuste (EsAjuste = true), que no cuenta dentro de las 4 del paquete.
+/// </summary>
+public sealed record SiguienteSesionDto(short? Numero, string Etapa, bool EsAjuste);
 
 public sealed record ProyectoDto(
     long Id, string Titulo, string Tipo, long ServicioId, string Servicio, string Estado, string? EtapaActual,
     Guid ClienteId, string Cliente, decimal PrecioAcordado, short SesionesIncluidas, int SesionesCumplidas, short RondaRevision,
     DateTimeOffset? AprobadoEn, DateTimeOffset? CanceladoEn, DateTimeOffset CreadoEn,
+    DateTimeOffset? RevisionVenceEn, bool RevisionVencida,
     SiguienteSesionDto? Siguiente, int CreditosExtra,
     IReadOnlyList<ParticipanteDto> Participantes,
     IReadOnlyList<SesionProyectoDto> Sesiones,
@@ -43,7 +47,8 @@ public sealed record ProyectoDto(
 
 public sealed record ProyectoResumenDto(
     long Id, string Titulo, string Tipo, string Servicio, string Estado, string? EtapaActual,
-    Guid ClienteId, string Cliente, short SesionesIncluidas, int SesionesCumplidas, DateTimeOffset CreadoEn);
+    Guid ClienteId, string Cliente, short SesionesIncluidas, int SesionesCumplidas, DateTimeOffset CreadoEn,
+    DateTimeOffset? RevisionVenceEn);
 
 /// <summary>Bandeja del colaborador: solicitudes para participar en proyectos.</summary>
 public sealed record ParticipacionDto(

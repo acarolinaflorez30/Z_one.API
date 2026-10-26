@@ -150,7 +150,7 @@ public sealed class AgendaService(ZOneDbContext db, TimeProvider time) : IAgenda
 
         var esProyecto = f.Tipo == TipoSesion.Proyecto;
         var titulo = esProyecto
-            ? $"{f.Proyecto} · {(f.EsExtra ? "Sesión extra" : $"Sesión {f.Numero}")}"
+            ? $"{f.Proyecto} · {(f.EsExtra ? "Sesión extra" : f.Etapa == EtapaProyecto.Revision ? "Sesión de ajuste" : $"Sesión {f.Numero}")}"
             : $"Alquiler · {f.Sala}";
 
         return new AgendaItemDto(
@@ -208,11 +208,22 @@ public sealed class AgendaService(ZOneDbContext db, TimeProvider time) : IAgenda
                 : await db.Ordenes.CountAsync(o =>
                     o.ClienteId == clienteId && o.Estado == EstadoOrden.Pendiente && o.VenceEn > ahora, ct);
 
+        // Cliente: trabajos que debe aprobar (dentro de sus 24 h).
+        // Administrador: revisiones cuyo plazo venció sin respuesta; las decide él desde su panel.
+        var revisiones = 0;
+        if (yo.EsAdmin)
+            revisiones = await db.Proyectos.CountAsync(p => p.Estado == EstadoProyecto.EnRevision && p.RevisionVenceEn <= ahora, ct);
+        else if (clienteId != null)
+            revisiones = await db.Proyectos.CountAsync(p =>
+                p.ClienteId == clienteId && p.Estado == EstadoProyecto.EnRevision && p.RevisionVenceEn > ahora, ct);
+
+        var sinLeer = await db.Notificaciones.CountAsync(n => n.UsuarioId == uid && n.LeidaEn == null, ct);
+
         var proxima = await Proyectar(
                 PorVista(visibles, "proximas", ahora).OrderBy(s => s.Inicio).ThenBy(s => s.Id).Take(1), uid, ahora)
             .FirstOrDefaultAsync(ct);
 
-        return new AgendaResumenDto(proximas7, porResponder, porCerrar, solicitudes, cobros,
+        return new AgendaResumenDto(proximas7, porResponder, porCerrar, solicitudes, cobros, revisiones, sinLeer,
             proxima is null ? null : Mapear(proxima, ahora));
     }
 }

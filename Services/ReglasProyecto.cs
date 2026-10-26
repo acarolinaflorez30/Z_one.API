@@ -3,36 +3,56 @@ using ZOne.Api.Dtos;
 
 namespace ZOne.Api.Services;
 
+/// <summary>La próxima sesión que se puede programar. Numero es null en la sesión de ajuste.</summary>
+public sealed record ProximaSesion(int? Numero, EtapaProyecto Etapa, bool EsAjuste);
+
 /// <summary>
-/// Reglas de negocio de los proyectos, en un solo lugar:
-/// canción completa = 4 sesiones (producción, grabación, mezcla, masterización) + 1 de revisión;
-/// servicio parcial = 1 sesión. Una sesión se gasta del paquete cuando se marca cumplida.
+/// Reglas de negocio de los proyectos, en un solo lugar.
+///
+/// Canción completa = 4 sesiones de trabajo, una por etapa y en este orden:
+///   1 producción · 2 grabación · 3 edición y producción · 4 mezcla y masterización.
+/// Al cumplirse la 4.ª, el cliente tiene 24 h para aprobar. Si pide ajustes se habilita UNA sesión de ajuste
+/// (no cuenta dentro de las 4 y no siempre llega a ocurrir). Otra ronda de ajustes requiere una sesión extra pagada.
+///
+/// Servicio parcial = 1 sesión. Al cumplirse queda finalizado: sin revisión, sin aprobación y sin ajustes.
+///
+/// Una sesión se gasta del paquete cuando se marca cumplida.
 /// </summary>
 public static class ReglasProyecto
 {
     private static readonly EtapaProyecto[] EtapasCancion =
-        [EtapaProyecto.Produccion, EtapaProyecto.Grabacion, EtapaProyecto.Mezcla, EtapaProyecto.Masterizacion];
+    [
+        EtapaProyecto.Produccion, EtapaProyecto.Grabacion,
+        EtapaProyecto.EdicionProduccion, EtapaProyecto.MezclaMasterizacion
+    ];
 
-    /// <summary>Sesiones de trabajo que deben cumplirse antes de poder pedir la revisión.</summary>
-    public static int SesionesAntesDeRevision(Proyecto p) => p.Tipo == TipoProyecto.CancionCompleta ? 4 : 1;
+    /// <summary>Sesiones de trabajo del paquete (la de ajuste y las extra no cuentan aquí).</summary>
+    public static int SesionesDelPaquete(Proyecto p) => p.Tipo == TipoProyecto.CancionCompleta ? EtapasCancion.Length : 1;
 
     public static EtapaProyecto EtapaDe(Proyecto p, int numero)
     {
         if (p.Tipo == TipoProyecto.CancionCompleta)
             return numero >= 1 && numero <= EtapasCancion.Length ? EtapasCancion[numero - 1] : EtapaProyecto.Revision;
-        return numero <= 1 ? (p.Servicio?.Etapa ?? EtapaProyecto.Produccion) : EtapaProyecto.Revision;
+        return p.Servicio?.Etapa ?? EtapaProyecto.Produccion;
     }
 
     public static bool Abierta(Sesion s) =>
         s.Estado == EstadoSesion.PendienteAceptacion || s.Estado == EstadoSesion.Confirmada;
 
-    /// <summary>Sesiones del paquete ya cumplidas (las extra no cuentan).</summary>
-    public static int Cumplidas(IEnumerable<Sesion> sesiones) =>
-        sesiones.Count(s => !s.EsExtra && s.Estado == EstadoSesion.Cumplida);
+    /// <summary>Sesión de ajuste incluida en el paquete (la que se habilita cuando el cliente no aprueba).</summary>
+    public static bool EsAjusteIncluido(Sesion s) => !s.EsExtra && s.Etapa == EtapaProyecto.Revision;
 
-    /// <summary>Veces que el cliente pidió ajustes y todavía no se hizo la sesión correspondiente.</summary>
+    public static bool AjusteIncluidoUsado(IEnumerable<Sesion> sesiones) =>
+        sesiones.Any(s => EsAjusteIncluido(s) &&
+            (s.Estado == EstadoSesion.PendienteAceptacion || s.Estado == EstadoSesion.Confirmada || s.Estado == EstadoSesion.Cumplida));
+
+    /// <summary>Sesiones de trabajo ya cumplidas, para el contador "x/4". No cuentan las extra ni la de ajuste.</summary>
+    public static int Cumplidas(IEnumerable<Sesion> sesiones) =>
+        sesiones.Count(s => !s.EsExtra && s.Etapa != EtapaProyecto.Revision && s.Estado == EstadoSesion.Cumplida);
+
+    /// <summary>Veces que el cliente pidió ajustes y todavía no se cumplió la sesión correspondiente (incluida o extra).</summary>
     public static int AjustesPendientes(Proyecto p, IEnumerable<Sesion> sesiones) =>
-        p.RondaRevision - sesiones.Count(s => s.Etapa == EtapaProyecto.Revision && s.Estado == EstadoSesion.Cumplida);
+        Math.Max(0, p.RondaRevision - sesiones.Count(s => s.Etapa == EtapaProyecto.Revision && s.Estado == EstadoSesion.Cumplida));
 
     /// <summary>Sesiones extra pagadas que aún no se han usado.</summary>
     public static int Creditos(IEnumerable<Orden> ordenes, IEnumerable<Sesion> sesiones)
@@ -43,20 +63,23 @@ public static class ReglasProyecto
         return Math.Max(0, pagadas - usadas);
     }
 
-    /// <summary>La próxima sesión del paquete que se puede programar, o null si todavía no toca.</summary>
-    public static (int Numero, EtapaProyecto Etapa)? Siguiente(Proyecto p, IReadOnlyCollection<Sesion> sesiones)
+    /// <summary>
+    /// La próxima sesión que se puede programar, o null si todavía no toca:
+    /// una sesión de trabajo mientras falten de las 4, o la sesión de ajuste incluida si el cliente pidió ajustes.
+    /// </summary>
+    public static ProximaSesion? Siguiente(Proyecto p, IReadOnlyCollection<Sesion> sesiones)
     {
         if (p.Estado != EstadoProyecto.Confirmado && p.Estado != EstadoProyecto.EnCurso) return null;
         if (sesiones.Any(Abierta)) return null;
 
         var hechas = Cumplidas(sesiones);
-        if (hechas >= p.SesionesIncluidas) return null;
+        if (hechas < SesionesDelPaquete(p))
+            return new ProximaSesion(hechas + 1, EtapaDe(p, hechas + 1), false);
 
-        var numero = hechas + 1;
-        var etapa = EtapaDe(p, numero);
-        // La sesión de revisión solo existe si el cliente pidió ajustes.
-        if (etapa == EtapaProyecto.Revision && AjustesPendientes(p, sesiones) <= 0) return null;
-        return (numero, etapa);
+        if (p.Tipo == TipoProyecto.CancionCompleta && AjustesPendientes(p, sesiones) > 0 && !AjusteIncluidoUsado(sesiones))
+            return new ProximaSesion(null, EtapaProyecto.Revision, true);
+
+        return null;
     }
 
     /// <summary>

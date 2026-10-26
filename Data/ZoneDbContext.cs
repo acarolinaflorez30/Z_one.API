@@ -27,6 +27,7 @@ public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbC
     public DbSet<ParticipanteProyecto> Participantes => Set<ParticipanteProyecto>();
     public DbSet<AceptacionSesion> Aceptaciones => Set<AceptacionSesion>();
     public DbSet<ComentarioRevision> ComentariosRevision => Set<ComentarioRevision>();
+    public DbSet<Notificacion> Notificaciones => Set<Notificacion>();
 
     protected override void OnModelCreating(ModelBuilder mb)
     {
@@ -150,6 +151,13 @@ public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbC
             e.HasKey(x => x.Id);
             e.HasOne<Proyecto>().WithMany().HasForeignKey(x => x.ProyectoId);
             e.HasOne<Usuario>().WithMany().HasForeignKey(x => x.AutorId);
+        });
+
+        mb.Entity<Notificacion>(e =>
+        {
+            e.ToTable("notificaciones");
+            e.HasKey(x => x.Id);
+            e.HasOne<Usuario>().WithMany().HasForeignKey(x => x.UsuarioId);
         });
 
         // Las columnas de la base están en snake_case (PasswordHash -> password_hash).

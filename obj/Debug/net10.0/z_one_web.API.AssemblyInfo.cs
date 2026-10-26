@@ -15,7 +15,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("z_one_web.API")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+23ccc12ed2351fb93be2d16475c72bafaada7fd2")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+575a7b8dfbd5313b574a044b8dec2afccd37993a")]
 [assembly: System.Reflection.AssemblyProductAttribute("z_one_web.API")]
 [assembly: System.Reflection.AssemblyTitleAttribute("z_one_web.API")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

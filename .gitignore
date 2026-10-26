@@ -1,0 +1,8 @@
+# Compilación y archivos de Visual Studio: no deben ir al repositorio
+bin/
+obj/
+.vs/
+*.user
+*.suo
+# Secretos locales
+appsettings.*.local.json
