@@ -1,3 +1,4 @@
+
 using System.Text;
 using System.Threading.RateLimiting;
 using Amazon.Runtime;
@@ -22,10 +23,18 @@ builder.Services.AddOptions<JwtOptions>()
     .Validate(o => o.SigningKey.Length >= 32,
         "Jwt:SigningKey debe tener al menos 32 caracteres (usa user-secrets o una variable de entorno).")
     .ValidateOnStart();
-builder.Services.AddOptions<AuthOptions>().Bind(builder.Configuration.GetSection(AuthOptions.Section));
-builder.Services.AddOptions<StorageOptions>().Bind(builder.Configuration.GetSection(StorageOptions.Section));
-builder.Services.AddOptions<AlquilerOptions>().Bind(builder.Configuration.GetSection(AlquilerOptions.Section));
-builder.Services.AddOptions<ProyectoOptions>().Bind(builder.Configuration.GetSection(ProyectoOptions.Section));
+
+builder.Services.AddOptions<AuthOptions>()
+    .Bind(builder.Configuration.GetSection(AuthOptions.Section));
+
+builder.Services.AddOptions<StorageOptions>()
+    .Bind(builder.Configuration.GetSection(StorageOptions.Section));
+
+builder.Services.AddOptions<AlquilerOptions>()
+    .Bind(builder.Configuration.GetSection(AlquilerOptions.Section));
+
+builder.Services.AddOptions<ProyectoOptions>()
+    .Bind(builder.Configuration.GetSection(ProyectoOptions.Section));
 
 // Base de datos
 var connectionString = builder.Configuration.GetConnectionString("Default")
@@ -56,6 +65,7 @@ builder.Services.AddDbContext<ZOneDbContext>(o => o.UseNpgsql(connectionString, 
 builder.Services.AddSingleton<IAmazonS3>(sp =>
 {
     var s = sp.GetRequiredService<IOptions<StorageOptions>>().Value;
+
     var config = new AmazonS3Config
     {
         ServiceURL = s.ServiceUrl,
@@ -65,17 +75,22 @@ builder.Services.AddSingleton<IAmazonS3>(sp =>
         RequestChecksumCalculation = RequestChecksumCalculation.WHEN_REQUIRED,
         ResponseChecksumValidation = ResponseChecksumValidation.WHEN_REQUIRED
     };
-    return new AmazonS3Client(new BasicAWSCredentials(s.AccessKey, s.SecretKey), config);
+
+    return new AmazonS3Client(
+        new BasicAWSCredentials(s.AccessKey, s.SecretKey),
+        config);
 });
+
 builder.Services.AddSingleton<IFotoStorage, S3FotoStorage>();
 
-//Servicios
+// Servicios
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IPasswordHasher, Pbkdf2PasswordHasher>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
 builder.Services.AddSingleton<AuthCookieWriter>();
 builder.Services.AddSingleton<IEmailSender, LogEmailSender>();
 builder.Services.AddHttpContextAccessor();
+
 builder.Services.AddScoped<ICurrentUser, CurrentUser>();
 builder.Services.AddScoped<IAuditoriaService, AuditoriaService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
@@ -95,11 +110,15 @@ builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
 // Autenticación: JWT leído desde cookie
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
+builder.Services
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer();
+
 builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
     .Configure<IOptions<JwtOptions>>((o, jwtOptions) =>
     {
         var jwt = jwtOptions.Value;
+
         o.MapInboundClaims = false;
         o.TokenValidationParameters = new TokenValidationParameters
         {
@@ -108,27 +127,37 @@ builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationSc
             ValidateAudience = true,
             ValidAudience = jwt.Audience,
             ValidateIssuerSigningKey = true,
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.SigningKey)),
+            IssuerSigningKey = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(jwt.SigningKey)),
             ValidateLifetime = true,
             ClockSkew = TimeSpan.FromSeconds(30),
             NameClaimType = "name",
             RoleClaimType = "role"
         };
+
         o.Events = new JwtBearerEvents
         {
             OnMessageReceived = context =>
             {
                 if (string.IsNullOrEmpty(context.Token) &&
-                    context.Request.Cookies.TryGetValue(AuthCookieWriter.Access, out var token))
+                    context.Request.Cookies.TryGetValue(
+                        AuthCookieWriter.Access, out var token))
+                {
                     context.Token = token;
+                }
+
                 return Task.CompletedTask;
             }
         };
     });
+
 builder.Services.AddAuthorization();
 
 // CORS: solo el origen del frontend, con cookies
-var authOpciones = builder.Configuration.GetSection(AuthOptions.Section).Get<AuthOptions>() ?? new AuthOptions();
+var authOpciones = builder.Configuration
+    .GetSection(AuthOptions.Section)
+    .Get<AuthOptions>() ?? new AuthOptions();
+
 var origenes = authOpciones.AllowedOrigins.Length > 0
     ? authOpciones.AllowedOrigins
     : new[] { authOpciones.FrontendBaseUrl };
@@ -136,16 +165,22 @@ var origenes = authOpciones.AllowedOrigins.Length > 0
 builder.Services.AddCors(o => o.AddDefaultPolicy(p => p
     .WithOrigins(origenes)
     .AllowCredentials()
-    .WithHeaders("Content-Type", "Authorization", RequireCustomHeaderMiddleware.HeaderName)
+    .WithHeaders(
+        "Content-Type",
+        "Authorization",
+        RequireCustomHeaderMiddleware.HeaderName)
     .WithMethods("GET", "POST", "PUT", "PATCH", "DELETE")));
 
 // Límite de peticiones por IP
 builder.Services.AddRateLimiter(o =>
 {
     o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
     o.OnRejected = async (context, ct) =>
     {
-        context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        context.HttpContext.Response.StatusCode =
+            StatusCodes.Status429TooManyRequests;
+
         await context.HttpContext.Response.WriteAsJsonAsync(new
         {
             status = 429,
@@ -155,9 +190,15 @@ builder.Services.AddRateLimiter(o =>
     };
 
     void Politica(string nombre, int limite, TimeSpan ventana) =>
-        o.AddPolicy(nombre, context => RateLimitPartition.GetFixedWindowLimiter(
-            context.Connection.RemoteIpAddress?.ToString() ?? "desconocida",
-            _ => new FixedWindowRateLimiterOptions { PermitLimit = limite, Window = ventana, QueueLimit = 0 }));
+        o.AddPolicy(nombre, context =>
+            RateLimitPartition.GetFixedWindowLimiter(
+                context.Connection.RemoteIpAddress?.ToString() ?? "desconocida",
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = limite,
+                    Window = ventana,
+                    QueueLimit = 0
+                }));
 
     Politica("login", 10, TimeSpan.FromMinutes(1));
     Politica("registro", 5, TimeSpan.FromMinutes(10));
@@ -167,12 +208,16 @@ builder.Services.AddRateLimiter(o =>
     Politica("reservas", 20, TimeSpan.FromMinutes(1));
 });
 
-// Solo se confía en proxies locales (loopback). Si despliegas detrás de un proxy, configura KnownProxies.
-// Detrás de un proveedor de hosting (que pone un proxy delante), activa Proxy:ConfiarEnReenviados.
-// Sin eso, todas las peticiones parecerían venir de la misma IP y el límite de peticiones afectaría a todos juntos.
+// Solo se confía en proxies locales (loopback). Si despliegas detrás de un proxy,
+// configura KnownProxies.
+// Detrás de un proveedor de hosting, activa Proxy:ConfiarEnReenviados.
+// Sin eso, todas las peticiones parecerían venir de la misma IP.
 builder.Services.Configure<ForwardedHeadersOptions>(o =>
 {
-    o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    o.ForwardedHeaders =
+        ForwardedHeaders.XForwardedFor |
+        ForwardedHeaders.XForwardedProto;
+
     if (builder.Configuration.GetValue<bool>("Proxy:ConfiarEnReenviados"))
     {
         o.KnownProxies.Clear();
@@ -200,8 +245,13 @@ app.Use(async (context, next) =>
     context.Response.Headers["X-Content-Type-Options"] = "nosniff";
     context.Response.Headers["X-Frame-Options"] = "DENY";
     context.Response.Headers["Referrer-Policy"] = "no-referrer";
-    if (context.Request.Path.StartsWithSegments("/auth") || context.Request.Path.StartsWithSegments("/admin"))
+
+    if (context.Request.Path.StartsWithSegments("/auth") ||
+        context.Request.Path.StartsWithSegments("/admin"))
+    {
         context.Response.Headers.CacheControl = "no-store";
+    }
+
     await next();
 });
 
@@ -213,7 +263,64 @@ app.UseMiddleware<PasswordChangeRequiredMiddleware>();
 app.UseAuthorization();
 
 app.MapControllers();
-app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+
+// Comprobación básica de salud de la API
+app.MapGet("/health", () =>
+    Results.Ok(new { status = "ok" }));
+
+// Comprobar la conexión con PostgreSQL
+app.MapGet("/health/db", async (ZOneDbContext db) =>
+{
+    try
+    {
+        var connected = await db.Database.CanConnectAsync();
+
+        if (!connected)
+        {
+            return Results.Problem(
+                title: "No se pudo conectar con la base de datos",
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+
+        return Results.Ok(new
+        {
+            status = "ok",
+            database = "connected"
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(
+            title: "Error de conexión con la base de datos",
+            detail: ex.Message,
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+});
+
+// Consultar la cantidad de registros de las tablas principales
+app.MapGet("/health/db/tables", async (ZOneDbContext db) =>
+{
+    try
+    {
+        var usuarios = await db.Usuarios.CountAsync();
+        var clientes = await db.Clientes.CountAsync();
+        var colaboradores = await db.Colaboradores.CountAsync();
+
+        return Results.Ok(new
+        {
+            usuarios,
+            clientes,
+            colaboradores
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(
+            title: "Error al consultar las tablas de la base de datos",
+            detail: ex.Message,
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+});
 
 await app.RunAsync();
 return 0;
