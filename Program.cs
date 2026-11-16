@@ -100,6 +100,7 @@ builder.Services.AddScoped<IAuditoriaService, AuditoriaService>();
     builder.Services.AddScoped<ICatalogoService, CatalogoService>();
     builder.Services.AddScoped<IAlquileresService, AlquileresService>();
     builder.Services.AddScoped<IProyectosService, ProyectosService>();
+    builder.Services.AddScoped<ICancionesService, CancionesService>();
     builder.Services.AddScoped<ISesionesProyectoService, SesionesProyectoService>();
     builder.Services.AddScoped<IOrdenesService, OrdenesService>();
     builder.Services.AddScoped<IAgendaService, AgendaService>();

@@ -23,6 +23,7 @@ public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbC
     public DbSet<Sesion> Sesiones => Set<Sesion>();
     public DbSet<Orden> Ordenes => Set<Orden>();
     public DbSet<Proyecto> Proyectos => Set<Proyecto>();
+    public DbSet<Cancion> Canciones => Set<Cancion>();
     public DbSet<HistorialPrecio> HistorialPrecios => Set<HistorialPrecio>();
     public DbSet<ParticipanteProyecto> Participantes => Set<ParticipanteProyecto>();
     public DbSet<AceptacionSesion> Aceptaciones => Set<AceptacionSesion>();
@@ -128,6 +129,14 @@ public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbC
             e.HasOne(x => x.Cliente).WithMany().HasForeignKey(x => x.ClienteId);
             e.HasOne(x => x.Servicio).WithMany().HasForeignKey(x => x.ServicioId);
             e.HasMany(x => x.Participantes).WithOne(x => x.Proyecto).HasForeignKey(x => x.ProyectoId);
+        });
+
+        mb.Entity<Cancion>(e =>
+        {
+            e.ToTable("canciones");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Partes).HasColumnType("jsonb");
+            e.HasOne(x => x.Proyecto).WithMany().HasForeignKey(x => x.ProyectoId);
         });
 
         mb.Entity<ParticipanteProyecto>(e =>
