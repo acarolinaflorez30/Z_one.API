@@ -24,6 +24,8 @@ public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbC
     public DbSet<Orden> Ordenes => Set<Orden>();
     public DbSet<Proyecto> Proyectos => Set<Proyecto>();
     public DbSet<Cancion> Canciones => Set<Cancion>();
+    public DbSet<Solicitud> Solicitudes => Set<Solicitud>();
+    public DbSet<SolicitudColaborador> SolicitudColaboradores => Set<SolicitudColaborador>();
     public DbSet<HistorialPrecio> HistorialPrecios => Set<HistorialPrecio>();
     public DbSet<ParticipanteProyecto> Participantes => Set<ParticipanteProyecto>();
     public DbSet<AceptacionSesion> Aceptaciones => Set<AceptacionSesion>();
@@ -137,6 +139,26 @@ public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbC
             e.HasKey(x => x.Id);
             e.Property(x => x.Partes).HasColumnType("jsonb");
             e.HasOne(x => x.Proyecto).WithMany().HasForeignKey(x => x.ProyectoId);
+        });
+
+        mb.Entity<Solicitud>(e =>
+        {
+            e.ToTable("solicitudes");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Partes).HasColumnType("jsonb");
+            e.Property(x => x.Descripcion).IsRequired();
+            e.HasOne(x => x.Cliente).WithMany().HasForeignKey(x => x.ClienteId);
+            e.HasOne(x => x.Sala).WithMany().HasForeignKey(x => x.SalaId);
+            e.HasOne(x => x.Cancion).WithMany().HasForeignKey(x => x.CancionId);
+            e.HasOne(x => x.Proyecto).WithMany().HasForeignKey(x => x.ProyectoId);
+            e.HasMany(x => x.Colaboradores).WithOne(x => x.Solicitud).HasForeignKey(x => x.SolicitudId);
+        });
+
+        mb.Entity<SolicitudColaborador>(e =>
+        {
+            e.ToTable("solicitud_colaboradores");
+            e.HasKey(x => new { x.SolicitudId, x.ColaboradorId });
+            e.HasOne(x => x.Colaborador).WithMany().HasForeignKey(x => x.ColaboradorId);
         });
 
         mb.Entity<ParticipanteProyecto>(e =>
