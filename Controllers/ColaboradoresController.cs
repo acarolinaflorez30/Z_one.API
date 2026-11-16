@@ -21,7 +21,7 @@ public sealed class ColaboradoresController(IColaboradoresService servicio) : Co
         [FromQuery] int pagina = 1, [FromQuery] int tamano = 25, CancellationToken ct = default) =>
         servicio.ListarAsync(perfil, vinculacion, q, pagina, tamano, ct);
 
-    /// <summary>El perfil del colaborador que inició sesión.</summary>
+    ///El perfil del colaborador que inició sesión.
     [HttpGet("me")]
     public async Task<ColaboradorDto> Me(CancellationToken ct)
     {

@@ -5,7 +5,7 @@ using ZOne.Api.Services;
 
 namespace ZOne.Api.Controllers;
 
-/// <summary>Avisos de cada persona (sesión cumplida, revisión pendiente, ajustes pedidos...). Solo ve los suyos.</summary>
+///Avisos de cada persona (sesión cumplida, revisión pendiente, ajustes pedidos...).Solo ve los suyos.
 [ApiController]
 [Route("notificaciones")]
 [Authorize]

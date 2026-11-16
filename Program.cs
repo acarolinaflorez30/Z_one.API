@@ -93,19 +93,20 @@ builder.Services.AddHttpContextAccessor();
 
 builder.Services.AddScoped<ICurrentUser, CurrentUser>();
 builder.Services.AddScoped<IAuditoriaService, AuditoriaService>();
-builder.Services.AddScoped<IAuthService, AuthService>();
-builder.Services.AddScoped<IAdminUsuariosService, AdminUsuariosService>();
-builder.Services.AddScoped<IColaboradoresService, ColaboradoresService>();
-builder.Services.AddScoped<IPublicoService, PublicoService>();
-builder.Services.AddScoped<ICatalogoService, CatalogoService>();
-builder.Services.AddScoped<IAlquileresService, AlquileresService>();
-builder.Services.AddScoped<IProyectosService, ProyectosService>();
-builder.Services.AddScoped<ISesionesProyectoService, SesionesProyectoService>();
-builder.Services.AddScoped<IOrdenesService, OrdenesService>();
-builder.Services.AddScoped<IAgendaService, AgendaService>();
-builder.Services.AddScoped<INotificacionesService, NotificacionesService>();
+    builder.Services.AddScoped<IAuthService, AuthService>();
+    builder.Services.AddScoped<IAdminUsuariosService, AdminUsuariosService>();
+    builder.Services.AddScoped<IColaboradoresService, ColaboradoresService>();
+    builder.Services.AddScoped<IPublicoService, PublicoService>();
+    builder.Services.AddScoped<ICatalogoService, CatalogoService>();
+    builder.Services.AddScoped<IAlquileresService, AlquileresService>();
+    builder.Services.AddScoped<IProyectosService, ProyectosService>();
+    builder.Services.AddScoped<ISesionesProyectoService, SesionesProyectoService>();
+    builder.Services.AddScoped<IOrdenesService, OrdenesService>();
+    builder.Services.AddScoped<IAgendaService, AgendaService>();
+    builder.Services.AddScoped<INotificacionesService, NotificacionesService>();
+    builder.Services.AddScoped<ILandingService, LandingService>();
 
-builder.Services.AddControllers();
+    builder.Services.AddControllers();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
@@ -232,6 +233,7 @@ if (args.Length > 0 && args[0] == "crear-admin")
     return await AdminBootstrap.RunAsync(app.Services, args[1..]);
 
 app.UseForwardedHeaders();
+app.UseStaticFiles();
 app.UseExceptionHandler();
 
 if (!app.Environment.IsDevelopment())

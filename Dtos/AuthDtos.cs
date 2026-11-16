@@ -20,6 +20,7 @@ public sealed record UsuarioDto(
 public sealed record SesionResponse(UsuarioDto Usuario, DateTimeOffset AccesoExpiraEn);
 
 // Administración
+
 public sealed record CrearColaboradorRequest(
     string Nombre,
     string Email,
