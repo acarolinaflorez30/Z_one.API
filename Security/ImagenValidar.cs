@@ -4,10 +4,11 @@ namespace ZOne.Api.Security;
 
 public readonly record struct ImagenInfo(string Mime, string Extension, int Ancho, int Alto);
 
-/// <summary>
+/// 
 /// Valida fotos por su contenido real (firma binaria y cabecera), sin confiar en la extensión
 /// ni en el Content-Type que declara el navegador. Permite JPG, PNG y WebP de hasta 1.5 MB.
-/// </summary>
+/// 
+
 public static class ImagenValidator
 {
     public const int MaxBytes = 1_572_864;   // 1.5 MB

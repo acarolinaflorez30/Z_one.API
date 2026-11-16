@@ -21,7 +21,7 @@ public sealed class AuthController(IAuthService auth, ICurrentUser actual, AuthC
         return StatusCode(status, new SesionResponse(s.Usuario, s.AccessExpiraEn));
     }
 
-    /// <summary>Registro autónomo: solo crea clientes. Los colaboradores los crea el administrador.</summary>
+    ///Registro autónomo: solo crea clientes. Los colaboradores los crea el administrador.</summary>
     [HttpPost("registro")]
     [AllowAnonymous]
     [EnableRateLimiting("registro")]

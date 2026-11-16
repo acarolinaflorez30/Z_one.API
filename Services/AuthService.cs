@@ -220,9 +220,14 @@ public sealed class AuthService(
         }
 
         var (sesion, nuevo) = Emitir(actual.Usuario, actual.Familia, ctx, ahora);
+
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        await db.SaveChangesAsync(ct);
+
         actual.RevocadoEn = ahora;
         actual.ReemplazadoPor = nuevo.Id;
         await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
         return sesion;
     }
 

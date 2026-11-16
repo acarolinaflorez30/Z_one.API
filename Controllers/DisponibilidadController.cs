@@ -6,7 +6,7 @@ using ZOne.Api.Services;
 
 namespace ZOne.Api.Controllers;
 
-/// <summary>Horarios ocupados de una sala. Público y sin datos personales: sirve para elegir una hora libre.</summary>
+/// Horarios ocupados de una sala. Público y sin datos personales: sirve para elegir una hora libre.</summary>
 [ApiController]
 [Route("publico/salas")]
 [AllowAnonymous]
