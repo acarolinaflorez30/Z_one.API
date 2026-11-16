@@ -1,4 +1,6 @@
-﻿using ZOne.Api.Domain;
+﻿using Microsoft.EntityFrameworkCore;
+using ZOne.Api.Data;
+using ZOne.Api.Domain;
 using ZOne.Api.Dtos;
 
 namespace ZOne.Api.Services;
@@ -6,15 +8,28 @@ namespace ZOne.Api.Services;
 /// <summary>La próxima sesión que se puede programar. Numero es null en la sesión de ajuste.</summary>
 public sealed record ProximaSesion(int? Numero, EtapaProyecto Etapa, bool EsAjuste);
 
+/// <summary>Cómo se cobra una sesión: precio por sesión (3 h), por hora, o gratis (ajuste incluido).</summary>
+public enum ModalidadCobro { PorSesion, PorHora, Gratis }
+
+/// <summary>Un colaborador tal como se muestra y se cobra dentro de una sesión.</summary>
+public sealed record PersonaInfo(
+    Guid UsuarioId, Guid ColaboradorId, PerfilColaborador Perfil, string Nombre, decimal? PrecioHora, decimal? PrecioSesion);
+
+/// <summary>Quién mira: define qué precios se muestran (los ven el cliente dueño, el administrador y cada colaborador el suyo).</summary>
+public sealed record Vista(Guid UsuarioId, bool EsAdmin, bool EsDueno)
+{
+    public bool VePrecios => EsAdmin || EsDueno;
+}
+
 /// <summary>
 /// Reglas de negocio de los proyectos, en un solo lugar.
 ///
-/// Canción completa = 4 sesiones de trabajo, una por etapa y en este orden:
+/// Canción completa = 4 sesiones de trabajo (3 h cada una), una por etapa y en este orden:
 ///   1 producción · 2 grabación · 3 edición y producción · 4 mezcla y masterización.
-/// Al cumplirse la 4.ª, el cliente tiene 24 h para aprobar. Si pide ajustes se habilita UNA sesión de ajuste
-/// (no cuenta dentro de las 4 y no siempre llega a ocurrir). Otra ronda de ajustes requiere una sesión extra pagada.
+/// Al cumplirse la 4.ª, el cliente tiene 24 h para aprobar. Si pide ajustes se habilita UNA sesión de ajuste gratis
+/// (no cuenta dentro de las 4). Otra ronda de ajustes requiere una sesión extra (cobrada por hora).
 ///
-/// Servicio parcial = 1 sesión. Al cumplirse queda finalizado: sin revisión, sin aprobación y sin ajustes.
+/// Servicio parcial = 1 sesión (3 h). Al cumplirse queda finalizado: sin revisión, sin aprobación y sin ajustes.
 ///
 /// Una sesión se gasta del paquete cuando se marca cumplida.
 /// </summary>
@@ -26,7 +41,6 @@ public static class ReglasProyecto
         EtapaProyecto.EdicionProduccion, EtapaProyecto.MezclaMasterizacion
     ];
 
-    /// <summary>Sesiones de trabajo del paquete (la de ajuste y las extra no cuentan aquí).</summary>
     public static int SesionesDelPaquete(Proyecto p) => p.Tipo == TipoProyecto.CancionCompleta ? EtapasCancion.Length : 1;
 
     public static EtapaProyecto EtapaDe(Proyecto p, int numero)
@@ -36,37 +50,24 @@ public static class ReglasProyecto
         return p.Servicio?.Etapa ?? EtapaProyecto.Produccion;
     }
 
+    /// <summary>Una sesión "abierta" retiene la sala y bloquea programar otra: espera colaboradores, espera el pago o está confirmada.</summary>
     public static bool Abierta(Sesion s) =>
-        s.Estado == EstadoSesion.PendienteAceptacion || s.Estado == EstadoSesion.Confirmada;
+        s.Estado is EstadoSesion.PendienteAceptacion or EstadoSesion.PendientePago or EstadoSesion.Confirmada;
 
-    /// <summary>Sesión de ajuste incluida en el paquete (la que se habilita cuando el cliente no aprueba).</summary>
+    public static bool Viva(Sesion s) => Abierta(s) || s.Estado == EstadoSesion.Cumplida;
+
     public static bool EsAjusteIncluido(Sesion s) => !s.EsExtra && s.Etapa == EtapaProyecto.Revision;
 
-    public static bool AjusteIncluidoUsado(IEnumerable<Sesion> sesiones) =>
-        sesiones.Any(s => EsAjusteIncluido(s) &&
-            (s.Estado == EstadoSesion.PendienteAceptacion || s.Estado == EstadoSesion.Confirmada || s.Estado == EstadoSesion.Cumplida));
+    public static bool AjusteIncluidoUsado(IEnumerable<Sesion> sesiones) => sesiones.Any(s => EsAjusteIncluido(s) && Viva(s));
 
     /// <summary>Sesiones de trabajo ya cumplidas, para el contador "x/4". No cuentan las extra ni la de ajuste.</summary>
     public static int Cumplidas(IEnumerable<Sesion> sesiones) =>
         sesiones.Count(s => !s.EsExtra && s.Etapa != EtapaProyecto.Revision && s.Estado == EstadoSesion.Cumplida);
 
-    /// <summary>Veces que el cliente pidió ajustes y todavía no se cumplió la sesión correspondiente (incluida o extra).</summary>
     public static int AjustesPendientes(Proyecto p, IEnumerable<Sesion> sesiones) =>
         Math.Max(0, p.RondaRevision - sesiones.Count(s => s.Etapa == EtapaProyecto.Revision && s.Estado == EstadoSesion.Cumplida));
 
-    /// <summary>Sesiones extra pagadas que aún no se han usado.</summary>
-    public static int Creditos(IEnumerable<Orden> ordenes, IEnumerable<Sesion> sesiones)
-    {
-        var pagadas = ordenes.Count(o => o.Concepto == ConceptoOrden.SesionExtra && o.Estado == EstadoOrden.Pagada);
-        var usadas = sesiones.Count(s => s.EsExtra &&
-            (s.Estado == EstadoSesion.PendienteAceptacion || s.Estado == EstadoSesion.Confirmada || s.Estado == EstadoSesion.Cumplida));
-        return Math.Max(0, pagadas - usadas);
-    }
-
-    /// <summary>
-    /// La próxima sesión que se puede programar, o null si todavía no toca:
-    /// una sesión de trabajo mientras falten de las 4, o la sesión de ajuste incluida si el cliente pidió ajustes.
-    /// </summary>
+    /// <summary>La próxima sesión que se puede programar, o null si todavía no toca.</summary>
     public static ProximaSesion? Siguiente(Proyecto p, IReadOnlyCollection<Sesion> sesiones)
     {
         if (p.Estado != EstadoProyecto.Confirmado && p.Estado != EstadoProyecto.EnCurso) return null;
@@ -82,38 +83,143 @@ public static class ReglasProyecto
         return null;
     }
 
-    /// <summary>
-    /// Nombres que se muestran dentro de un proyecto. Un colaborador aparece con su nombre artístico;
-    /// su nombre real solo lo ve el administrador.
-    /// </summary>
-    public static Dictionary<Guid, string> Nombres(Proyecto p, bool esAdmin)
+    // ───────────────────────── Cobro e invitaciones ─────────────────────────
+
+    public static ModalidadCobro Modalidad(Sesion s) =>
+        s.Tipo == TipoSesion.Alquiler || s.EsExtra ? ModalidadCobro.PorHora
+        : s.Etapa == EtapaProyecto.Revision ? ModalidadCobro.Gratis
+        : ModalidadCobro.PorSesion;
+
+    /// <summary>Solo las filas con rol son invitaciones (las antiguas sin rol son de cuando el cliente también "aceptaba").</summary>
+    public static IEnumerable<AceptacionSesion> Invitados(Sesion s) => s.Aceptaciones.Where(a => a.Rol != null);
+
+    public static bool PuedeConfirmar(Sesion s) =>
+        s.Estado == EstadoSesion.PendienteAceptacion && Invitados(s).Any(a => a.Estado == EstadoParticipacion.Aceptada);
+
+    public static bool RequiereDecision(Sesion s)
     {
-        var d = new Dictionary<Guid, string> { [p.Cliente.UsuarioId] = p.Cliente.Nombre };
-        foreach (var x in p.Participantes)
-        {
-            var artistico = x.Colaborador.NombreArtistico;
-            d[x.Colaborador.UsuarioId] = !string.IsNullOrWhiteSpace(artistico)
-                ? artistico
-                : (esAdmin ? x.Colaborador.Usuario.Nombre : "Colaborador");
-        }
-        return d;
+        if (s.Estado != EstadoSesion.PendienteAceptacion) return false;
+        var inv = Invitados(s).ToList();
+        return inv.Count > 0 && inv.All(a => a.Estado != EstadoParticipacion.Pendiente) && inv.Any(a => a.Estado == EstadoParticipacion.Rechazada);
     }
 
-    public static SesionProyectoDto MapSesion(Sesion s, IReadOnlyDictionary<Guid, string> nombres, DateTimeOffset ahora)
+    public static RolParticipante? RolDe(PerfilColaborador perfil) => perfil switch
     {
-        var vencida = s.Estado == EstadoSesion.PendienteAceptacion && s.ExpiraEn is { } e && e <= ahora;
+        PerfilColaborador.Artista => RolParticipante.Artista,
+        PerfilColaborador.Productor => RolParticipante.Productor,
+        _ => null
+    };
+
+    public static bool Vencida(Sesion s, DateTimeOffset ahora) =>
+        s.Estado is EstadoSesion.PendienteAceptacion or EstadoSesion.PendientePago && s.ExpiraEn is { } e && e <= ahora;
+
+    public static Guid ClienteIdDe(Sesion s) =>
+        s.Tipo == TipoSesion.Alquiler
+            ? s.ClienteId ?? throw new InvalidOperationException("El alquiler no tiene cliente.")
+            : s.Proyecto?.ClienteId ?? throw new InvalidOperationException("La sesión no tiene proyecto.");
+
+    public static string TextoTipo(TipoProyecto t) => t == TipoProyecto.CancionCompleta ? "canción completa" : "servicio parcial";
+
+    /// <summary>"Sesión 2 de 4", "Sesión única", "Sesión de ajuste", "Sesión extra" o "Alquiler de sala".</summary>
+    public static string Descripcion(TipoSesion tipo, bool esExtra, EtapaProyecto? etapa, short? numero, TipoProyecto? tipoProyecto, short? incluidas)
+    {
+        if (tipo == TipoSesion.Alquiler) return "Alquiler de sala";
+        if (esExtra) return "Sesión extra";
+        if (etapa == EtapaProyecto.Revision) return "Sesión de ajuste";
+        return tipoProyecto == TipoProyecto.CancionCompleta ? $"Sesión {numero} de {incluidas}" : "Sesión única";
+    }
+
+    public static string Descripcion(Sesion s) =>
+        Descripcion(s.Tipo, s.EsExtra, s.Etapa, s.NumeroSesion, s.Proyecto?.Tipo, s.Proyecto?.SesionesIncluidas);
+
+    public static decimal Horas(Sesion s) => Math.Round((decimal)(s.Fin - s.Inicio).TotalMinutes / 60m, 2);
+
+    // ───────────────────────── Mapeo ─────────────────────────
+
+    public static List<InvitadoDto> MapInvitados(
+        Sesion s, IReadOnlyDictionary<Guid, PersonaInfo> personas, Vista yo, DateTimeOffset ahora)
+    {
+        var vencida = Vencida(s, ahora) || s.Estado is EstadoSesion.Expirada or EstadoSesion.Cancelada;
+        var minutos = (decimal)(s.Fin - s.Inicio).TotalMinutes;
+        var modalidad = Modalidad(s);
+
+        return Invitados(s).OrderBy(a => a.EnviadaEn).ThenBy(a => a.UsuarioId).Select(a =>
+        {
+            personas.TryGetValue(a.UsuarioId, out var per);
+            decimal? precio = per is not null && (yo.VePrecios || a.UsuarioId == yo.UsuarioId)
+                ? PreciosService.PrecioDe(modalidad, minutos, per.PrecioHora, per.PrecioSesion)
+                : null;
+            var estado = a.Estado == EstadoParticipacion.Pendiente && vencida ? EstadoParticipacion.Expirada : a.Estado;
+            return new InvitadoDto(
+                a.UsuarioId, per?.ColaboradorId, per?.Nombre ?? "Colaborador",
+                per is null ? null : Convenciones.Api(per.Perfil),
+                a.Rol is null ? null : Convenciones.Api(a.Rol.Value),
+                Convenciones.Api(estado), a.EnviadaEn, a.RespondidaEn, precio);
+        }).ToList();
+    }
+
+    /// <summary>Sesión de proyecto lista para la API. Requiere Sala, Aceptaciones y Proyecto (con Servicio y Cliente) cargados.</summary>
+    public static SesionProyectoDto MapSesion(
+        Sesion s, IReadOnlyDictionary<Guid, PersonaInfo> personas, Vista yo,
+        decimal? monto, Orden? orden, DateTimeOffset ahora)
+    {
+        var p = s.Proyecto!;
+        var vencida = Vencida(s, ahora);
         var estado = vencida ? EstadoSesion.Expirada : s.Estado;
 
-        var aceptaciones = s.Aceptaciones.Select(a => new AceptacionDto(
-            a.UsuarioId,
-            nombres.TryGetValue(a.UsuarioId, out var nombre) ? nombre : "Participante",
-            Convenciones.Api(a.Estado),
-            a.RespondidaEn)).ToList();
+        string? estadoPago = null;
+        if (orden is not null)
+            estadoPago = Convenciones.Api(orden.Estado == EstadoOrden.Pendiente && (orden.VenceEn <= ahora || vencida) ? EstadoOrden.Expirada : orden.Estado);
 
+        var verDinero = yo.VePrecios;
         return new SesionProyectoDto(
-            s.Id, s.ProyectoId ?? 0, s.NumeroSesion,
-            s.Etapa is null ? null : Convenciones.Api(s.Etapa.Value),
-            s.EsExtra, s.SalaId, s.Sala.Nombre, s.Inicio, s.Fin,
-            Convenciones.Api(estado), s.ExpiraEn, s.Resena, s.CumplidaEn, aceptaciones);
+            s.Id, p.Id, p.Titulo, Convenciones.Api(p.Tipo), p.Servicio.Nombre,
+            s.NumeroSesion, p.SesionesIncluidas, Descripcion(s), s.Etapa is null ? null : Convenciones.Api(s.Etapa.Value),
+            s.EsExtra, EsAjusteIncluido(s),
+            s.SalaId, s.Sala.Nombre, s.Inicio, s.Fin, Horas(s),
+            p.ClienteId, p.Cliente.Nombre,
+            Convenciones.Api(estado), s.ExpiraEn, s.Resena, s.CumplidaEn,
+            verDinero ? monto : null, verDinero ? estadoPago : null, verDinero ? orden?.Id : null,
+            !vencida && PuedeConfirmar(s), !vencida && RequiereDecision(s),
+            MapInvitados(s, personas, yo, ahora));
     }
+}
+
+public static class PersonasExtensions
+{
+    /// <summary>
+    /// Colaboradores por id de usuario. Se muestran con su nombre artístico; el nombre real solo lo ve el administrador.
+    /// </summary>
+    public static async Task<Dictionary<Guid, PersonaInfo>> PersonasAsync(
+        this ZOneDbContext db, IEnumerable<Guid> usuarioIds, bool esAdmin, CancellationToken ct)
+    {
+        var ids = usuarioIds.Distinct().ToList();
+        if (ids.Count == 0) return [];
+
+        var filas = await db.Colaboradores.AsNoTracking()
+            .Where(c => ids.Contains(c.UsuarioId))
+            .Select(c => new
+            {
+                c.UsuarioId,
+                c.Id,
+                c.Perfil,
+                c.NombreArtistico,
+                NombreUsuario = c.Usuario.Nombre,
+                c.PrecioHora,
+                c.PrecioSesion
+            })
+            .ToListAsync(ct);
+
+        return filas.ToDictionary(
+            f => f.UsuarioId,
+            f => new PersonaInfo(
+                f.UsuarioId, f.Id, f.Perfil,
+                !string.IsNullOrWhiteSpace(f.NombreArtistico) ? f.NombreArtistico! : (esAdmin ? f.NombreUsuario : "Colaborador"),
+                f.PrecioHora, f.PrecioSesion));
+    }
+
+    /// <summary>¿Participa esta persona en el proyecto como colaborador invitado a alguna de sus sesiones?</summary>
+    public static Task<bool> EsInvitadoAsync(this ZOneDbContext db, long proyectoId, Guid usuarioId, CancellationToken ct) =>
+        db.Aceptaciones.AsNoTracking().AnyAsync(
+            a => a.UsuarioId == usuarioId && a.Rol != null && a.Sesion.ProyectoId == proyectoId, ct);
 }

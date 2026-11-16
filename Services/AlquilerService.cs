@@ -20,10 +20,19 @@ public interface IAlquileresService
     Task<DisponibilidadDto> DisponibilidadAsync(long salaId, DateTimeOffset desde, DateTimeOffset hasta, CancellationToken ct);
 }
 
+/// <summary>
+/// Alquiler de salas (por hora, de 1 a 4 h). Sin colaboradores: queda pendiente de pago al crearlo.
+/// Con colaboradores: primero esperan su respuesta (pendiente_aceptacion), el cliente decide y luego queda pendiente de pago.
+/// El monto sigue las tarifas actuales mientras no se pague; al registrar el pago queda fijo.
+/// </summary>
 public sealed class AlquileresService(
     ZOneDbContext db,
     IAuditoriaService auditoria,
     IOptions<AlquilerOptions> opciones,
+    IOptions<ProyectoOptions> proyectoOpt,
+    IPreciosService precios,
+    IInvitacionesService invitaciones,
+    INotificacionesService notificaciones,
     TimeProvider time) : IAlquileresService
 {
     private readonly AlquilerOptions _o = opciones.Value;
@@ -31,7 +40,7 @@ public sealed class AlquileresService(
     private sealed record Fila(
         long Id, long SalaId, string Sala, Guid ClienteId, string Cliente,
         DateTimeOffset Inicio, DateTimeOffset Fin, EstadoSesion Estado, DateTimeOffset? ExpiraEn,
-        decimal Monto, EstadoOrden EstadoPago, DateTimeOffset? PagadaEn, string? Referencia);
+        decimal? MontoOrden, EstadoOrden? EstadoPago, DateTimeOffset? PagadaEn, string? Referencia);
 
     // ───────────────────────── Utilidades ─────────────────────────
 
@@ -48,27 +57,58 @@ public sealed class AlquileresService(
             .Select(c => (Guid?)c.Id)
             .FirstOrDefaultAsync(ct);
 
+    /// <summary>LEFT JOIN con el cobro: mientras espera a los colaboradores todavía no existe.</summary>
     private IQueryable<Fila> Consulta() =>
         from s in db.Sesiones.AsNoTracking()
         where s.Tipo == TipoSesion.Alquiler
-        join o in db.Ordenes.AsNoTracking() on (long?)s.Id equals o.SesionId
+        join o in db.Ordenes.AsNoTracking() on (long?)s.Id equals o.SesionId into ordenes
+        from o in ordenes.DefaultIfEmpty()
         select new Fila(
             s.Id, s.SalaId, s.Sala.Nombre, s.ClienteId ?? Guid.Empty, s.Cliente!.Nombre,
-            s.Inicio, s.Fin, s.Estado, s.ExpiraEn, o.Monto, o.Estado, o.PagadaEn, o.ReferenciaPago);
+            s.Inicio, s.Fin, s.Estado, s.ExpiraEn,
+            (decimal?)o.Monto, (EstadoOrden?)o.Estado, o.PagadaEn, o.ReferenciaPago);
 
-    /// <summary>Si la retención ya venció pero el cron aún no corrió, se muestra como expirada.</summary>
-    private static AlquilerDto Mapear(Fila f, DateTimeOffset ahora)
+    private async Task<List<AlquilerDto>> ArmarAsync(List<Fila> filas, Actor actor, CancellationToken ct)
     {
-        var vencida = f.Estado == EstadoSesion.PendientePago && f.ExpiraEn is { } e && e <= ahora;
-        var estado = vencida ? EstadoSesion.Expirada : f.Estado;
-        var pago = vencida && f.EstadoPago == EstadoOrden.Pendiente ? EstadoOrden.Expirada : f.EstadoPago;
-        var cancelable = f.Estado == EstadoSesion.PendientePago && !vencida;
+        if (filas.Count == 0) return [];
+        var ahora = time.GetUtcNow();
+        var ids = filas.Select(f => f.Id).ToList();
 
-        return new AlquilerDto(
-            f.Id, f.SalaId, f.Sala, f.ClienteId, f.Cliente, f.Inicio, f.Fin,
-            Math.Round((decimal)(f.Fin - f.Inicio).TotalHours, 2),
-            Convenciones.Api(estado), f.ExpiraEn, f.Monto, Convenciones.Api(pago),
-            f.PagadaEn, f.Referencia, cancelable);
+        var sesiones = await db.Sesiones.AsNoTracking()
+            .Include(s => s.Sala).Include(s => s.Aceptaciones)
+            .Where(s => ids.Contains(s.Id))
+            .ToListAsync(ct);
+        var porId = sesiones.ToDictionary(s => s.Id);
+        var montos = await precios.MontosAsync(sesiones, ct);
+        var personas = await db.PersonasAsync(
+            sesiones.SelectMany(ReglasProyecto.Invitados).Select(a => a.UsuarioId), actor.EsAdmin, ct);
+        var vista = new Vista(actor.UsuarioId, actor.EsAdmin, EsDueno: true);   // solo el dueño y el administrador llegan aquí
+
+        return filas.Select(f =>
+        {
+            var s = porId[f.Id];
+            var vencida = ReglasProyecto.Vencida(s, ahora);
+            var estado = vencida ? EstadoSesion.Expirada : f.Estado;
+            var pago = f.EstadoPago is { } ep
+                ? (ep == EstadoOrden.Pendiente && (vencida || s.Estado is EstadoSesion.Expirada or EstadoSesion.Cancelada) ? EstadoOrden.Expirada : ep)
+                : (EstadoOrden?)null;
+            decimal? monto = montos.TryGetValue(f.Id, out var m) ? m : f.MontoOrden;
+            var cancelable = s.Estado is EstadoSesion.PendienteAceptacion or EstadoSesion.PendientePago && !vencida;
+
+            return new AlquilerDto(
+                f.Id, f.SalaId, f.Sala, f.ClienteId, f.Cliente, f.Inicio, f.Fin,
+                Math.Round((decimal)(f.Fin - f.Inicio).TotalHours, 2),
+                Convenciones.Api(estado), f.ExpiraEn, monto, pago is null ? null : Convenciones.Api(pago.Value),
+                f.PagadaEn, f.Referencia, cancelable,
+                !vencida && ReglasProyecto.PuedeConfirmar(s), !vencida && ReglasProyecto.RequiereDecision(s),
+                ReglasProyecto.MapInvitados(s, personas, vista, ahora));
+        }).ToList();
+    }
+
+    private async Task GuardarAsync(CancellationToken ct)
+    {
+        try { await db.SaveChangesAsync(ct); }
+        catch (DbUpdateException ex) when (Traducir(ex) is not null) { throw Traducir(ex)!; }
     }
 
     /// <summary>Traduce los errores de las reglas de la base de datos a respuestas claras.</summary>
@@ -98,8 +138,6 @@ public sealed class AlquileresService(
         {
             if (r.ClienteId is not { } indicado)
                 throw ApiException.Validacion("clienteId", "Indica para qué cliente es la reserva.");
-            var existe = await db.Clientes.AsNoTracking().AnyAsync(c => c.Id == indicado && c.Activo, ct);
-            if (!existe) throw ApiException.NoEncontrado("No existe ese cliente.");
             clienteId = indicado;
         }
         else
@@ -107,62 +145,85 @@ public sealed class AlquileresService(
             clienteId = await ClienteIdDeAsync(actor.UsuarioId, ct)
                         ?? throw ApiException.Prohibido("Solo los clientes pueden reservar salas.");
         }
+        var cliente = await db.Clientes.FirstOrDefaultAsync(c => c.Id == clienteId && c.Activo, ct)
+                      ?? throw ApiException.NoEncontrado("No existe ese cliente.");
 
-        var sala = await db.Salas.AsNoTracking().FirstOrDefaultAsync(s => s.Id == r.SalaId && s.Activo, ct)
+        var sala = await db.Salas.FirstOrDefaultAsync(s => s.Id == r.SalaId && s.Activo && (s.Publicada || actor.EsAdmin), ct)
                    ?? throw ApiException.NoEncontrado("No existe esa sala o no está disponible.");
-        if (sala.PrecioHora <= 0)
-            throw ApiException.Conflicto("tarifa_no_definida", "La sala aún no tiene tarifa definida.");
+        PreciosService.ValidarSala(sala, ModalidadCobro.PorHora);
 
         await LiberarVencidosAsync(ct);
 
         if (!actor.EsAdmin)
         {
+            // Cuentan las reservas que esperan colaboradores y las que esperan el pago.
             var pendientes = await db.Sesiones.CountAsync(s =>
                 s.Tipo == TipoSesion.Alquiler && s.ClienteId == clienteId &&
-                s.Estado == EstadoSesion.PendientePago && s.ExpiraEn > ahora, ct);
+                (s.Estado == EstadoSesion.PendientePago || s.Estado == EstadoSesion.PendienteAceptacion) && s.ExpiraEn > ahora, ct);
             if (pendientes >= _o.MaxPendientesPorCliente)
                 throw ApiException.Conflicto("demasiadas_pendientes",
-                    $"Ya tienes {pendientes} reservas sin pagar. Paga o cancela alguna antes de reservar otra.");
+                    $"Ya tienes {pendientes} reservas sin confirmar o sin pagar. Paga o cancela alguna antes de reservar otra.");
         }
 
-        var minutos = (decimal)(fin - inicio).TotalMinutes;
-        var monto = Math.Round(sala.PrecioHora * minutos / 60m, 2, MidpointRounding.AwayFromZero);
-
-        // La sala se retiene hasta que venza el plazo de pago (o hasta que empiece la sesión, lo que ocurra primero).
-        var vence = ahora.AddHours(_o.RetencionHoras);
-        if (_o.LiberarAlInicio && inicio < vence) vence = inicio;
+        var invitadas = await invitaciones.CrearInvitacionesAsync(r.ColaboradorIds, ModalidadCobro.PorHora, ahora, ct);
+        var po = proyectoOpt.Value;
 
         var sesion = new Sesion
         {
             Tipo = TipoSesion.Alquiler,
-            SalaId = sala.Id,
-            ClienteId = clienteId,
+            Sala = sala,
+            Cliente = cliente,
             Inicio = inicio,
             Fin = fin,
-            Estado = EstadoSesion.PendientePago,
-            ExpiraEn = vence,
             CreadaPor = actor.UsuarioId,
             CreadoEn = ahora
         };
-        var orden = new Orden
+
+        if (invitadas.Count == 0)
         {
-            Concepto = ConceptoOrden.Alquiler,
-            ClienteId = clienteId,
-            Sesion = sesion,
-            Monto = monto,
-            Estado = EstadoOrden.Pendiente,
-            VenceEn = vence,
-            CreadoEn = ahora,
-            ActualizadoEn = ahora
-        };
-        db.Sesiones.Add(sesion);
-        db.Ordenes.Add(orden);
+            // Solo la sala: queda pendiente de pago. La sala se retiene hasta que venza el plazo de pago
+            // (o hasta que empiece la sesión, lo que ocurra primero).
+            var minutos = (decimal)(fin - inicio).TotalMinutes;
+            var monto = PreciosService.Calcular(ModalidadCobro.PorHora, sala, minutos, [], estricto: true).Total;
+            var vence = ahora.AddHours(_o.RetencionHoras);
+            if (_o.LiberarAlInicio && inicio < vence) vence = inicio;
+
+            sesion.Estado = EstadoSesion.PendientePago;
+            sesion.ExpiraEn = vence;
+            db.Sesiones.Add(sesion);
+            db.Ordenes.Add(new Orden
+            {
+                Concepto = ConceptoOrden.Alquiler,
+                ClienteId = clienteId,
+                Sesion = sesion,
+                Monto = monto,
+                Estado = EstadoOrden.Pendiente,
+                VenceEn = vence,
+                CreadoEn = ahora,
+                ActualizadoEn = ahora
+            });
+        }
+        else
+        {
+            // Con colaboradores: esperan su respuesta (72 h, reteniendo la sala) antes de pasar al pago.
+            var vence = ahora.AddHours(po.SesionAceptacionHoras);
+            if (_o.LiberarAlInicio && inicio < vence) vence = inicio;
+
+            sesion.Estado = EstadoSesion.PendienteAceptacion;
+            sesion.ExpiraEn = vence;
+            foreach (var inv in invitadas) sesion.Aceptaciones.Add(inv);
+            db.Sesiones.Add(sesion);
+        }
 
         auditoria.Registrar(actor.UsuarioId, "alquiler_creado", "sesion", null,
-            new { salaId = sala.Id, inicio, fin, monto, clienteId }, ctx.Ip);
+            new { salaId = sala.Id, inicio, fin, clienteId, colaboradores = invitadas.Count }, ctx.Ip);
+        await GuardarAsync(ct);
 
-        try { await db.SaveChangesAsync(ct); }
-        catch (DbUpdateException ex) when (Traducir(ex) is not null) { throw Traducir(ex)!; }
+        if (invitadas.Count > 0)
+        {
+            invitaciones.NotificarInvitaciones(sesion, invitadas, actor.UsuarioId);
+            await GuardarAsync(ct);
+        }
 
         return await ObtenerAsync(sesion.Id, actor, ct);
     }
@@ -201,7 +262,7 @@ public sealed class AlquileresService(
 
         var fila = await consulta.FirstOrDefaultAsync(ct)
                    ?? throw ApiException.NoEncontrado("No existe esa reserva.");
-        return Mapear(fila, time.GetUtcNow());
+        return (await ArmarAsync([fila], actor, ct))[0];
     }
 
     public async Task<PaginaDto<AlquilerDto>> ListarAsync(
@@ -238,8 +299,7 @@ public sealed class AlquileresService(
             .Skip((pagina - 1) * tamano).Take(tamano)
             .ToListAsync(ct);
 
-        var ahora = time.GetUtcNow();
-        return new PaginaDto<AlquilerDto>(filas.Select(f => Mapear(f, ahora)).ToList(), total, pagina, tamano);
+        return new PaginaDto<AlquilerDto>(await ArmarAsync(filas, actor, ct), total, pagina, tamano);
     }
 
     // ───────────────────────── Cancelar (solo antes de pagar) ─────────────────────────
@@ -247,7 +307,7 @@ public sealed class AlquileresService(
     public async Task<AlquilerDto> CancelarAsync(long id, Actor actor, ContextoPeticion ctx, CancellationToken ct)
     {
         await LiberarVencidosAsync(ct);
-        var (sesion, orden) = await CargarAsync(id, actor, ct);
+        var sesion = await CargarAsync(id, actor, ct);
 
         switch (sesion.Estado)
         {
@@ -255,17 +315,24 @@ public sealed class AlquileresService(
                 throw ApiException.Conflicto("alquiler_pagado",
                     "Un alquiler pagado no se puede cancelar y no tiene reembolso.");
             case EstadoSesion.PendientePago:
+            case EstadoSesion.PendienteAceptacion:
                 break;
             default:
                 throw ApiException.Conflicto("reserva_no_vigente", "Esa reserva ya no está vigente.");
         }
 
         sesion.Estado = EstadoSesion.Cancelada;
-        orden.Estado = EstadoOrden.Expirada;
-        auditoria.Registrar(actor.UsuarioId, "alquiler_cancelado", "sesion", sesion.Id.ToString(), null, ctx.Ip);
+        foreach (var a in sesion.Aceptaciones.Where(a => a.Estado == EstadoParticipacion.Pendiente))
+            a.Estado = EstadoParticipacion.Expirada;
+        var cobros = await db.Ordenes.Where(o => o.SesionId == id && o.Estado == EstadoOrden.Pendiente).ToListAsync(ct);
+        foreach (var o in cobros) o.Estado = EstadoOrden.Expirada;
 
-        try { await db.SaveChangesAsync(ct); }
-        catch (DbUpdateException ex) when (Traducir(ex) is not null) { throw Traducir(ex)!; }
+        notificaciones.NotificarUsuarios(
+            ReglasProyecto.Invitados(sesion).Where(a => a.Estado is EstadoParticipacion.Aceptada or EstadoParticipacion.Expirada).Select(a => a.UsuarioId),
+            actor.UsuarioId, "sesion_cancelada", "Alquiler cancelado",
+            $"El cliente canceló {Textos.Sesion(sesion, proyectoOpt.Value.UtcOffsetHoras)}", null, sesion.Id);
+        auditoria.Registrar(actor.UsuarioId, "alquiler_cancelado", "sesion", sesion.Id.ToString(), null, ctx.Ip);
+        await GuardarAsync(ct);
 
         return await ObtenerAsync(id, actor, ct);
     }
@@ -278,7 +345,7 @@ public sealed class AlquileresService(
 
         var referenciaLimpia = Entrada.TextoOpcional(referencia, "referencia", 120);
         await LiberarVencidosAsync(ct);
-        var (sesion, orden) = await CargarAsync(id, actor, ct);
+        var sesion = await CargarAsync(id, actor, ct);
 
         switch (sesion.Estado)
         {
@@ -286,49 +353,65 @@ public sealed class AlquileresService(
                 break;
             case EstadoSesion.Confirmada:
                 throw ApiException.Conflicto("ya_pagado", "Esa reserva ya tiene el pago registrado.");
+            case EstadoSesion.PendienteAceptacion:
+                throw ApiException.Conflicto("esperando_colaboradores", "La reserva todavía espera la respuesta de los colaboradores.");
             default:
                 throw ApiException.Conflicto("plazo_vencido",
                     "El plazo para pagar venció o la reserva fue cancelada; la sala ya se liberó. Debe reservarse de nuevo.");
         }
 
+        var orden = await db.Ordenes.FirstOrDefaultAsync(o => o.SesionId == id && o.Estado == EstadoOrden.Pendiente, ct)
+                    ?? throw ApiException.NoEncontrado("La reserva no tiene un cobro pendiente.");
+
         var ahora = time.GetUtcNow();
         if (orden.VenceEn <= ahora)
             throw ApiException.Conflicto("plazo_vencido", "El plazo de pago ya venció.");
 
+        // Los precios no se congelan: al registrar el pago se recalcula con las tarifas de hoy y queda fijo.
+        var cobro = await precios.CobroDeSesionAsync(sesion, esAdmin: true, ct);
+        if (cobro.Total <= 0)
+            throw ApiException.Conflicto("tarifa_no_definida", "No se pudo calcular el cobro: revisa las tarifas.");
+
+        orden.Monto = cobro.Total;
         orden.Estado = EstadoOrden.Pagada;
         orden.PagadaEn = ahora;
         orden.RegistradaPor = actor.UsuarioId;
         orden.ReferenciaPago = referenciaLimpia;
+        orden.ActualizadoEn = ahora;
         sesion.Estado = EstadoSesion.Confirmada;
         sesion.ExpiraEn = null;
 
+        var resumen = Textos.Sesion(sesion, proyectoOpt.Value.UtcOffsetHoras);
+        notificaciones.NotificarUsuarios(
+            ReglasProyecto.Invitados(sesion).Where(a => a.Estado == EstadoParticipacion.Aceptada).Select(a => a.UsuarioId)
+                .Append(sesion.Cliente!.UsuarioId),
+            actor.UsuarioId, "sesion_confirmada", "Alquiler confirmado", $"Quedó confirmado: {resumen}", null, sesion.Id);
         auditoria.Registrar(actor.UsuarioId, "pago_registrado", "sesion", sesion.Id.ToString(),
             new { orden.Monto, referencia = referenciaLimpia }, ctx.Ip);
-
-        try { await db.SaveChangesAsync(ct); }
-        catch (DbUpdateException ex) when (Traducir(ex) is not null) { throw Traducir(ex)!; }
+        await GuardarAsync(ct);
 
         return await ObtenerAsync(id, actor, ct);
     }
 
-    private async Task<(Sesion Sesion, Orden Orden)> CargarAsync(long id, Actor actor, CancellationToken ct)
+    /// <summary>Carga el alquiler con todo lo necesario para decidir y calcular. El cliente solo accede a lo suyo (404 si no).</summary>
+    private async Task<Sesion> CargarAsync(long id, Actor actor, CancellationToken ct)
     {
-        var sesion = await db.Sesiones.FirstOrDefaultAsync(s => s.Id == id && s.Tipo == TipoSesion.Alquiler, ct)
-                     ?? throw ApiException.NoEncontrado("No existe esa reserva.");
+        var sesion = await db.Sesiones
+            .Include(s => s.Sala).Include(s => s.Aceptaciones).Include(s => s.Cliente)
+            .FirstOrDefaultAsync(s => s.Id == id && s.Tipo == TipoSesion.Alquiler, ct)
+            ?? throw ApiException.NoEncontrado("No existe esa reserva.");
 
         if (!actor.EsAdmin)
         {
             var mio = await ClienteIdDeAsync(actor.UsuarioId, ct);
             if (mio is null || sesion.ClienteId != mio) throw ApiException.NoEncontrado("No existe esa reserva.");
         }
-
-        var orden = await db.Ordenes.FirstOrDefaultAsync(o => o.SesionId == id, ct)
-                    ?? throw ApiException.NoEncontrado("La reserva no tiene orden de cobro.");
-        return (sesion, orden);
+        return sesion;
     }
 
     // ───────────────────────── Disponibilidad pública ─────────────────────────
 
+    /// <summary>Público: solo dice qué horas están "ocupado". No distingue reservas pendientes de confirmadas ni de qué tipo son.</summary>
     public async Task<DisponibilidadDto> DisponibilidadAsync(long salaId, DateTimeOffset desde, DateTimeOffset hasta, CancellationToken ct)
     {
         if (desde == default || hasta == default)
@@ -339,7 +422,7 @@ public sealed class AlquileresService(
         if (h <= d) throw ApiException.Validacion("hasta", "'hasta' debe ser posterior a 'desde'.");
         if (h - d > TimeSpan.FromDays(31)) throw ApiException.Validacion("hasta", "El rango máximo es de 31 días.");
 
-        var sala = await db.Salas.AsNoTracking().FirstOrDefaultAsync(s => s.Id == salaId && s.Activo, ct)
+        var sala = await db.Salas.AsNoTracking().FirstOrDefaultAsync(s => s.Id == salaId && s.Publicada, ct)
                    ?? throw ApiException.NoEncontrado("No existe esa sala.");
 
         var ahora = time.GetUtcNow();
@@ -349,14 +432,10 @@ public sealed class AlquileresService(
                      || ((s.Estado == EstadoSesion.PendientePago || s.Estado == EstadoSesion.PendienteAceptacion)
                          && s.ExpiraEn > ahora))
             .OrderBy(s => s.Inicio)
-            .Select(s => new { s.Inicio, s.Fin, s.Estado })
+            .Select(s => new { s.Inicio, s.Fin })
             .ToListAsync(ct);
 
-        // Solo se publica si el bloque está retenido (a la espera de pago o respuesta) o ya confirmado.
-        var bloques = filas.Select(f => new BloqueOcupadoDto(
-            f.Inicio, f.Fin,
-            (f.Estado is EstadoSesion.PendientePago or EstadoSesion.PendienteAceptacion) ? "retenida" : "confirmada")).ToList();
-
+        var bloques = filas.Select(f => new BloqueOcupadoDto(f.Inicio, f.Fin, "ocupado")).ToList();
         return new DisponibilidadDto(sala.Id, sala.Nombre, d, h, bloques);
     }
 }

@@ -14,18 +14,18 @@ public interface IAgendaService
 }
 
 /// <summary>
-/// Agenda unificada: alquileres y sesiones de proyecto en una sola lista. Cada persona ve solo lo suyo
-/// (el cliente, sus alquileres y las sesiones de sus proyectos; el colaborador, las de los proyectos donde participa)
-/// y el administrador ve todo. Lo que ocupa una sala de otra persona nunca se muestra aquí: para eso está la
-/// disponibilidad pública, que no incluye datos personales.
+/// Agenda unificada: alquileres y sesiones de proyecto en una sola lista. Cada persona ve solo lo suyo:
+/// el cliente, sus alquileres y las sesiones de sus proyectos; el colaborador, las sesiones a las que lo invitaron
+/// (pendientes o aceptadas); el administrador ve todo. Lo que ocupa una sala de otra persona nunca se muestra aquí:
+/// para eso está la disponibilidad pública, que solo dice "ocupado".
 /// </summary>
-public sealed class AgendaService(ZOneDbContext db, TimeProvider time) : IAgendaService
+public sealed class AgendaService(ZOneDbContext db, IPreciosService precios, TimeProvider time) : IAgendaService
 {
     private sealed record Fila(
         long Id, TipoSesion Tipo, long SalaId, string Sala, DateTimeOffset Inicio, DateTimeOffset Fin,
         EstadoSesion Estado, EtapaProyecto? Etapa, short? Numero, bool EsExtra, long? ProyectoId, string? Proyecto,
         Guid? ClienteId, string? Cliente, DateTimeOffset? ExpiraEn, string? Resena,
-        bool RequiereMiRespuesta, decimal? Monto, EstadoOrden? EstadoPago);
+        bool RequiereMiRespuesta, bool RequiereMiDecision, decimal? Monto, EstadoOrden? EstadoPago);
 
     // ───────────────────────── Qué puede ver cada quien ─────────────────────────
 
@@ -36,14 +36,17 @@ public sealed class AgendaService(ZOneDbContext db, TimeProvider time) : IAgenda
 
         var clienteId = yo.ClienteId;
         var colaboradorId = yo.ColaboradorId;
+        var uid = yo.UsuarioId;
 
         return consulta.Where(s =>
             (clienteId != null && (
                 (s.Tipo == TipoSesion.Alquiler && s.ClienteId == clienteId) ||
                 (s.Tipo == TipoSesion.Proyecto && s.Proyecto!.ClienteId == clienteId)))
             ||
-            (colaboradorId != null && s.Tipo == TipoSesion.Proyecto &&
-                s.Proyecto!.Participantes.Any(x => x.ColaboradorId == colaboradorId && x.Estado == EstadoParticipacion.Aceptada)));
+            // Invitaciones reales (con rol): las pendientes y las aceptadas. Las rechazadas o vencidas ya no le conciernen.
+            (colaboradorId != null && s.Aceptaciones.Any(a =>
+                a.UsuarioId == uid && a.Rol != null &&
+                (a.Estado == EstadoParticipacion.Pendiente || a.Estado == EstadoParticipacion.Aceptada))));
     }
 
     /// <summary>
@@ -119,8 +122,9 @@ public sealed class AgendaService(ZOneDbContext db, TimeProvider time) : IAgenda
             ? consulta.OrderBy(s => s.Inicio).ThenBy(s => s.Id)
             : consulta.OrderByDescending(s => s.Inicio).ThenByDescending(s => s.Id);
 
-        var filas = await Proyectar(ordenada.Skip((pagina - 1) * tamano).Take(tamano), actor.UsuarioId, ahora).ToListAsync(ct);
-        return new PaginaDto<AgendaItemDto>(filas.Select(f => Mapear(f, ahora)).ToList(), total, pagina, tamano);
+        var filas = await Proyectar(ordenada.Skip((pagina - 1) * tamano).Take(tamano), yo.UsuarioId, ahora).ToListAsync(ct);
+        var montos = await MontosVivosAsync(filas, yo, ct);
+        return new PaginaDto<AgendaItemDto>(filas.Select(f => Mapear(f, yo, ahora, montos)).ToList(), total, pagina, tamano);
     }
 
     private IQueryable<Fila> Proyectar(IQueryable<Sesion> q, Guid usuarioId, DateTimeOffset ahora) =>
@@ -133,12 +137,34 @@ public sealed class AgendaService(ZOneDbContext db, TimeProvider time) : IAgenda
                 ? (s.Cliente != null ? s.Cliente.Nombre : null)
                 : (s.Proyecto != null ? s.Proyecto.Cliente.Nombre : null),
             s.ExpiraEn, s.Resena,
+            // Colaborador: me invitaron y falta mi respuesta.
             s.Estado == EstadoSesion.PendienteAceptacion && s.ExpiraEn > ahora &&
-                s.Aceptaciones.Any(a => a.UsuarioId == usuarioId && a.Estado == EstadoParticipacion.Pendiente),
-            db.Ordenes.Where(o => o.SesionId == s.Id).Select(o => (decimal?)o.Monto).FirstOrDefault(),
-            db.Ordenes.Where(o => o.SesionId == s.Id).Select(o => (EstadoOrden?)o.Estado).FirstOrDefault()));
+                s.Aceptaciones.Any(a => a.UsuarioId == usuarioId && a.Rol != null && a.Estado == EstadoParticipacion.Pendiente),
+            // Cliente o administrador: ya respondieron todos y alguien rechazó.
+            s.Estado == EstadoSesion.PendienteAceptacion && s.ExpiraEn > ahora &&
+                s.Aceptaciones.Any(a => a.Rol != null) &&
+                !s.Aceptaciones.Any(a => a.Rol != null && a.Estado == EstadoParticipacion.Pendiente) &&
+                s.Aceptaciones.Any(a => a.Rol != null && a.Estado == EstadoParticipacion.Rechazada),
+            db.Ordenes.Where(o => o.SesionId == s.Id).OrderByDescending(o => o.Id).Select(o => (decimal?)o.Monto).FirstOrDefault(),
+            db.Ordenes.Where(o => o.SesionId == s.Id).OrderByDescending(o => o.Id).Select(o => (EstadoOrden?)o.Estado).FirstOrDefault()));
 
-    private static AgendaItemDto Mapear(Fila f, DateTimeOffset ahora)
+    private static bool VeDinero(Fila f, Identidad yo) =>
+        yo.EsAdmin || (yo.ClienteId is { } c && f.ClienteId == c);
+
+    /// <summary>Los cobros pendientes siguen las tarifas actuales (los pagados ya quedaron fijos).</summary>
+    private async Task<IReadOnlyDictionary<long, decimal>> MontosVivosAsync(IEnumerable<Fila> filas, Identidad yo, CancellationToken ct)
+    {
+        var ids = filas.Where(f => VeDinero(f, yo) && f.EstadoPago == EstadoOrden.Pendiente).Select(f => f.Id).ToList();
+        if (ids.Count == 0) return new Dictionary<long, decimal>();
+
+        var sesiones = await db.Sesiones.AsNoTracking()
+            .Include(s => s.Sala).Include(s => s.Aceptaciones)
+            .Where(s => ids.Contains(s.Id))
+            .ToListAsync(ct);
+        return await precios.MontosAsync(sesiones, ct);
+    }
+
+    private static AgendaItemDto Mapear(Fila f, Identidad yo, DateTimeOffset ahora, IReadOnlyDictionary<long, decimal> montos)
     {
         // Si el plazo ya venció pero el cron aún no corrió, se muestra como expirada.
         var vencida = (f.Estado == EstadoSesion.PendientePago || f.Estado == EstadoSesion.PendienteAceptacion)
@@ -147,6 +173,9 @@ public sealed class AgendaService(ZOneDbContext db, TimeProvider time) : IAgenda
         var estadoPago = f.EstadoPago is { } ep
             ? (vencida && ep == EstadoOrden.Pendiente ? EstadoOrden.Expirada : ep)
             : (EstadoOrden?)null;
+
+        var verDinero = VeDinero(f, yo);
+        decimal? monto = !verDinero ? null : montos.TryGetValue(f.Id, out var vivo) && estadoPago == EstadoOrden.Pendiente ? vivo : f.Monto;
 
         var esProyecto = f.Tipo == TipoSesion.Proyecto;
         var titulo = esProyecto
@@ -158,9 +187,9 @@ public sealed class AgendaService(ZOneDbContext db, TimeProvider time) : IAgenda
             Math.Round((decimal)(f.Fin - f.Inicio).TotalHours, 2), Convenciones.Api(estado),
             f.Etapa is null ? null : Convenciones.Api(f.Etapa.Value), f.Numero, f.EsExtra,
             f.ProyectoId, f.Proyecto, f.ClienteId, f.Cliente, f.ExpiraEn,
-            f.RequiereMiRespuesta && !vencida,
+            !vencida && (f.RequiereMiRespuesta || (f.RequiereMiDecision && VeDinero(f, yo))),
             esProyecto && f.Estado == EstadoSesion.Confirmada && f.Fin < ahora,
-            f.Resena, f.Monto, estadoPago is { } p ? Convenciones.Api(p) : null);
+            f.Resena, monto, verDinero && estadoPago is { } p ? Convenciones.Api(p) : null);
     }
 
     // ───────────────────────── Resumen (avisos del inicio) ─────────────────────────
@@ -175,13 +204,16 @@ public sealed class AgendaService(ZOneDbContext db, TimeProvider time) : IAgenda
 
         var proximas7 = await PorVista(visibles, "proximas", ahora).CountAsync(s => s.Inicio < limite, ct);
 
-        var porResponder = await visibles.CountAsync(s =>
-            s.Estado == EstadoSesion.PendienteAceptacion && s.ExpiraEn > ahora &&
-            s.Aceptaciones.Any(a => a.UsuarioId == uid && a.Estado == EstadoParticipacion.Pendiente), ct);
-
-        // Sesiones terminadas que esperan la reseña: las cierra el administrador o el productor del proyecto.
-        var porCerrar = 0;
+        // Colaborador: invitaciones por responder. El administrador no actúa como colaborador.
         var colaboradorId = yo.ColaboradorId;
+        var porResponder = colaboradorId == null
+            ? 0
+            : await visibles.CountAsync(s =>
+                s.Estado == EstadoSesion.PendienteAceptacion && s.ExpiraEn > ahora &&
+                s.Aceptaciones.Any(a => a.UsuarioId == uid && a.Rol != null && a.Estado == EstadoParticipacion.Pendiente), ct);
+
+        // Sesiones de proyecto terminadas que esperan la reseña: las cierra el administrador o el productor que aceptó esa sesión.
+        var porCerrar = 0;
         if (yo.EsAdmin)
         {
             porCerrar = await visibles.CountAsync(s =>
@@ -191,16 +223,20 @@ public sealed class AgendaService(ZOneDbContext db, TimeProvider time) : IAgenda
         {
             porCerrar = await visibles.CountAsync(s =>
                 s.Tipo == TipoSesion.Proyecto && s.Estado == EstadoSesion.Confirmada && s.Fin < ahora &&
-                s.Proyecto!.Participantes.Any(x => x.ColaboradorId == colaboradorId
-                    && x.Rol == RolParticipante.Productor && x.Estado == EstadoParticipacion.Aceptada), ct);
+                s.Aceptaciones.Any(a => a.UsuarioId == uid && a.Rol == RolParticipante.Productor
+                    && a.Estado == EstadoParticipacion.Aceptada), ct);
         }
 
-        var solicitudes = colaboradorId == null
-            ? 0
-            : await db.Participantes.CountAsync(x =>
-                x.ColaboradorId == colaboradorId && x.Estado == EstadoParticipacion.Pendiente && x.VenceEn > ahora, ct);
-
+        // Cliente y administrador: sesiones donde ya respondieron todos y alguien rechazó.
         var clienteId = yo.ClienteId;
+        var porDecidir = (yo.EsAdmin || clienteId != null)
+            ? await visibles.CountAsync(s =>
+                s.Estado == EstadoSesion.PendienteAceptacion && s.ExpiraEn > ahora &&
+                s.Aceptaciones.Any(a => a.Rol != null) &&
+                !s.Aceptaciones.Any(a => a.Rol != null && a.Estado == EstadoParticipacion.Pendiente) &&
+                s.Aceptaciones.Any(a => a.Rol != null && a.Estado == EstadoParticipacion.Rechazada), ct)
+            : 0;
+
         var cobros = yo.EsAdmin
             ? await db.Ordenes.CountAsync(o => o.Estado == EstadoOrden.Pendiente && o.VenceEn > ahora, ct)
             : clienteId == null
@@ -222,8 +258,9 @@ public sealed class AgendaService(ZOneDbContext db, TimeProvider time) : IAgenda
         var proxima = await Proyectar(
                 PorVista(visibles, "proximas", ahora).OrderBy(s => s.Inicio).ThenBy(s => s.Id).Take(1), uid, ahora)
             .FirstOrDefaultAsync(ct);
+        var montos = proxima is null ? new Dictionary<long, decimal>() : await MontosVivosAsync([proxima], yo, ct);
 
-        return new AgendaResumenDto(proximas7, porResponder, porCerrar, solicitudes, cobros, revisiones, sinLeer,
-            proxima is null ? null : Mapear(proxima, ahora));
+        return new AgendaResumenDto(proximas7, porResponder, porCerrar, porDecidir, cobros, revisiones, sinLeer,
+            proxima is null ? null : Mapear(proxima, yo, ahora, montos));
     }
 }

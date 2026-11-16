@@ -16,6 +16,8 @@ public sealed class Usuario
     public DateTimeOffset? BloqueadoHasta { get; set; }
     public DateTimeOffset? UltimoAcceso { get; set; }
     public DateTimeOffset? EmailVerificadoEn { get; set; }
+    /// <summary>Si false, no recibe avisos por correo (los de la web siguen). La recuperación de contraseña se envía siempre.</summary>
+    public bool RecibirCorreos { get; set; } = true;
     public DateTimeOffset ActualizadoEn { get; set; }
 
     public Cliente? Cliente { get; set; }
@@ -59,6 +61,11 @@ public sealed class Colaborador
     public DateTimeOffset CreadoEn { get; set; }
     public string? Especialidad { get; set; }
     public string? CiudadOrigen { get; set; }
+
+    /// <summary>Tarifa por hora (sesiones extra y alquiler con colaboradores). La define el propio colaborador o el administrador. Null = sin definir.</summary>
+    public decimal? PrecioHora { get; set; }
+    /// <summary>Tarifa por sesión estándar de grabación de 3 horas. Null = sin definir.</summary>
+    public decimal? PrecioSesion { get; set; }
 
     public Usuario Usuario { get; set; } = null!;
 }

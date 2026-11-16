@@ -12,6 +12,7 @@ public sealed record FotoArchivo(byte[] Datos, string Mime, string Version);
 public interface IColaboradoresService
 {
     Task<PaginaDto<ColaboradorResumenDto>> ListarAsync(string? perfil, string? vinculacion, string? q, int pagina, int tamano, CancellationToken ct);
+    Task<IReadOnlyList<ColaboradorCatalogoDto>> ListarInvitablesAsync(string? perfil, CancellationToken ct);
     Task<Guid> IdPropioAsync(Guid usuarioId, CancellationToken ct);
     Task<ColaboradorDto> ObtenerAsync(Guid id, Actor actor, CancellationToken ct);
     Task<ColaboradorDto> ActualizarAsync(Guid id, ActualizarColaboradorRequest r, Actor actor, ContextoPeticion ctx, CancellationToken ct);
@@ -109,6 +110,35 @@ public sealed class ColaboradoresService(
         return new PaginaDto<ColaboradorResumenDto>(items, total, pagina, tamano);
     }
 
+    /// <summary>
+    /// Colaboradores que un cliente o el administrador pueden invitar: activos, artistas o productores, con el precio
+    /// que la sesión necesita ya definido. Los precios solo se ven con una cuenta (el controlador exige sesión).
+    /// </summary>
+    public async Task<IReadOnlyList<ColaboradorCatalogoDto>> ListarInvitablesAsync(string? perfil, CancellationToken ct)
+    {
+        var consulta = db.Colaboradores.AsNoTracking()
+            .Where(c => c.Vinculacion == EstadoVinculacion.Activo && c.Usuario.Activo
+                        && (c.Perfil == PerfilColaborador.Artista || c.Perfil == PerfilColaborador.Productor));
+
+        if (!string.IsNullOrWhiteSpace(perfil))
+        {
+            if (!Convenciones.TryParseEnum<PerfilColaborador>(perfil, out var perfilFiltro)
+                || perfilFiltro is not (PerfilColaborador.Artista or PerfilColaborador.Productor))
+                throw ApiException.Validacion("perfil", "El perfil debe ser artista o productor.");
+            consulta = consulta.Where(c => c.Perfil == perfilFiltro);
+        }
+
+        var filas = await consulta
+            .OrderBy(c => c.NombreArtistico ?? c.Usuario.Nombre).ThenBy(c => c.Id)
+            .Select(c => new { c.Id, c.NombreArtistico, c.Usuario.Nombre, c.Perfil, c.Especialidad, c.Disponibilidad, c.PrecioHora, c.PrecioSesion })
+            .ToListAsync(ct);
+
+        // El nombre real nunca se muestra a clientes: solo el artístico (o el nombre de la cuenta si no tiene).
+        return filas.Select(f => new ColaboradorCatalogoDto(
+            f.Id, f.NombreArtistico ?? f.Nombre, Convenciones.Api(f.Perfil), f.Especialidad,
+            Convenciones.Api(f.Disponibilidad), f.PrecioHora, f.PrecioSesion)).ToList();
+    }
+
     public async Task<Guid> IdPropioAsync(Guid usuarioId, CancellationToken ct)
     {
         var id = await db.Colaboradores.AsNoTracking()
@@ -134,7 +164,7 @@ public sealed class ColaboradoresService(
             Convenciones.Api(c.Perfil), Convenciones.Api(c.Vinculacion), Convenciones.Api(c.Disponibilidad),
             c.VisiblePublico, c.NombreArtistico, c.NombreReal, c.FechaNacimiento, c.Biografia, c.Trayectoria,
             c.Productoras, c.Especialidad, c.CiudadOrigen, Convenciones.FotoUrl(c.Id, c.Foto, publica: false),
-            c.FechaIngreso, c.DesvinculadoEn, detalle, portafolio.Select(Mapeos.Portafolio).ToList());
+            c.FechaIngreso, c.DesvinculadoEn, c.PrecioHora, c.PrecioSesion, detalle, portafolio.Select(Mapeos.Portafolio).ToList());
     }
 
     // ───────────────────────── Edición del perfil ─────────────────────────
@@ -146,6 +176,13 @@ public sealed class ColaboradoresService(
         if (t.Length == 0) return null;
         if (t.Length > max) throw ApiException.Validacion(campo, $"No puede superar {max} caracteres.");
         return t;
+    }
+
+    private static decimal? PrecioOpcional(decimal precio, string campo)
+    {
+        if (precio < 0 || precio > 1_000_000_000m)
+            throw ApiException.Validacion(campo, "El precio debe ser un valor entre 0 y 1.000.000.000.");
+        return precio == 0 ? null : Math.Round(precio, 2);
     }
 
     public async Task<ColaboradorDto> ActualizarAsync(
@@ -197,6 +234,19 @@ public sealed class ColaboradoresService(
             if (!Convenciones.TryParseEnum<Disponibilidad>(r.Disponibilidad, out var disponibilidad))
                 throw ApiException.Validacion("disponibilidad", "Debe ser disponible o no_disponible.");
             Marca("disponibilidad", disponibilidad != c.Disponibilidad); c.Disponibilidad = disponibilidad;
+        }
+
+        // Los precios los define el propio colaborador o el administrador (CargarAsync ya limita el acceso).
+        // null = sin cambios; 0 = quitar el precio (queda sin definir y no podrá ser invitado a ese tipo de sesión).
+        if (r.PrecioHora is { } ph)
+        {
+            var nuevo = PrecioOpcional(ph, "precioHora");
+            Marca("precioHora", nuevo != c.PrecioHora); c.PrecioHora = nuevo;
+        }
+        if (r.PrecioSesion is { } ps)
+        {
+            var nuevo = PrecioOpcional(ps, "precioSesion");
+            Marca("precioSesion", nuevo != c.PrecioSesion); c.PrecioSesion = nuevo;
         }
 
         if (r.VisiblePublico is { } visible)

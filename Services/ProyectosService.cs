@@ -1,4 +1,5 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using ZOne.Api.Data;
 using ZOne.Api.Domain;
@@ -13,15 +14,11 @@ public interface IProyectosService
     Task<ProyectoDto> CrearAsync(CrearProyectoRequest r, Actor actor, ContextoPeticion ctx, CancellationToken ct);
     Task<PaginaDto<ProyectoResumenDto>> ListarAsync(Actor actor, string? estado, bool? revisionVencida, int pagina, int tamano, CancellationToken ct);
     Task<ProyectoDto> ObtenerAsync(long id, Actor actor, CancellationToken ct);
-    Task<ProyectoDto> AgregarParticipanteAsync(long id, ParticipanteRequest r, Actor actor, ContextoPeticion ctx, CancellationToken ct);
-    Task<ProyectoDto> ContinuarAsync(long id, Actor actor, ContextoPeticion ctx, CancellationToken ct);
     Task<ProyectoDto> CancelarAsync(long id, Actor actor, ContextoPeticion ctx, CancellationToken ct);
     Task<ProyectoDto> ComentarAsync(long id, string comentario, Actor actor, ContextoPeticion ctx, CancellationToken ct);
     Task<ProyectoDto> SolicitarAjustesAsync(long id, string? comentario, Actor actor, ContextoPeticion ctx, CancellationToken ct);
     Task<ProyectoDto> AprobarAsync(long id, Actor actor, ContextoPeticion ctx, CancellationToken ct);
-    Task<ProyectoDto> SolicitarSesionExtraAsync(long id, Actor actor, ContextoPeticion ctx, CancellationToken ct);
-    Task<PaginaDto<ParticipacionDto>> ListarParticipacionesAsync(Actor actor, string? estado, int pagina, int tamano, CancellationToken ct);
-    Task<ProyectoDto> ResponderParticipacionAsync(long participacionId, bool aceptar, Actor actor, ContextoPeticion ctx, CancellationToken ct);
+    Task<IReadOnlyList<HistorialEventoDto>> HistorialAsync(long id, Actor actor, CancellationToken ct);
 }
 
 public sealed class ProyectosService(
@@ -29,36 +26,33 @@ public sealed class ProyectosService(
     IAuditoriaService auditoria,
     IOptions<ProyectoOptions> opciones,
     INotificacionesService notificaciones,
+    ISesionesProyectoService sesionesSvc,
+    SesionVistaBuilder vistas,
+    IPreciosService precios,
     TimeProvider time) : IProyectosService
 {
     private readonly ProyectoOptions _o = opciones.Value;
 
     // ───────────────────────── Utilidades ─────────────────────────
 
-    /// <summary>Aplica los vencimientos (pago a 24 h, solicitudes a 72 h) antes de leer o decidir.</summary>
+    /// <summary>Aplica los vencimientos (pago a 24 h, invitaciones a 72 h) antes de leer o decidir.</summary>
     private Task LiberarVencidosAsync(CancellationToken ct) =>
         db.Database.ExecuteSqlRawAsync("select public.expirar_vencidos()", ct);
 
     private static bool EsDueno(Proyecto p, Identidad yo) => yo.ClienteId is { } c && c == p.ClienteId;
 
-    private static bool EsProductorAceptado(Proyecto p, Identidad yo) =>
-        yo.ColaboradorId is { } k && p.Participantes.Any(x =>
-            x.ColaboradorId == k && x.Rol == RolParticipante.Productor && x.Estado == EstadoParticipacion.Aceptada);
-
     private async Task<Proyecto> CargarAsync(long id, CancellationToken ct) =>
         await db.Proyectos
             .Include(p => p.Cliente)
             .Include(p => p.Servicio)
-            .Include(p => p.Participantes).ThenInclude(x => x.Colaborador).ThenInclude(c => c.Usuario)
             .FirstOrDefaultAsync(p => p.Id == id, ct)
         ?? throw ApiException.NoEncontrado("No existe ese proyecto.");
 
-    /// <summary>El administrador, el cliente dueño y los colaboradores invitados acceden; los demás reciben 404.</summary>
+    /// <summary>El administrador, el cliente dueño y los colaboradores invitados a alguna sesión acceden; los demás reciben 404.</summary>
     private async Task<Identidad> AccesoAsync(Proyecto p, Actor actor, CancellationToken ct)
     {
         var yo = await db.ResolverAsync(actor, ct);
-        var participa = yo.ColaboradorId is { } k && p.Participantes.Any(x => x.ColaboradorId == k);
-        if (!yo.EsAdmin && !EsDueno(p, yo) && !participa)
+        if (!yo.EsAdmin && !EsDueno(p, yo) && !await db.EsInvitadoAsync(p.Id, actor.UsuarioId, ct))
             throw ApiException.NoEncontrado("No existe ese proyecto.");
         return yo;
     }
@@ -81,10 +75,15 @@ public sealed class ProyectosService(
                 "El plazo de 24 horas para decidir venció. El administrador definirá el resultado.");
     }
 
-    // ───────────────────────── Crear ─────────────────────────
+    // ───────────────────────── Crear (servicio + título + primera sesión) ─────────────────────────
 
+    /// <summary>
+    /// Crea el proyecto y su primera sesión en una sola petición. El proyecto queda pendiente hasta que se pague esa
+    /// primera sesión; si la sesión expira, se cancela o no se paga en 24 h, el proyecto se cancela y hay que crearlo de nuevo.
+    /// </summary>
     public async Task<ProyectoDto> CrearAsync(CrearProyectoRequest r, Actor actor, ContextoPeticion ctx, CancellationToken ct)
     {
+        await LiberarVencidosAsync(ct);
         var yo = await db.ResolverAsync(actor, ct);
         var ahora = time.GetUtcNow();
 
@@ -93,8 +92,6 @@ public sealed class ProyectosService(
         {
             if (r.ClienteId is not { } indicado)
                 throw ApiException.Validacion("clienteId", "Indica para qué cliente es el proyecto.");
-            if (!await db.Clientes.AsNoTracking().AnyAsync(c => c.Id == indicado && c.Activo, ct))
-                throw ApiException.NoEncontrado("No existe ese cliente.");
             clienteId = indicado;
         }
         else
@@ -102,9 +99,14 @@ public sealed class ProyectosService(
             clienteId = yo.ClienteId ?? throw ApiException.Prohibido("Solo los clientes o el administrador crean proyectos.");
         }
 
-        var titulo = Entrada.Texto(r.Titulo, "titulo", 2, 150);
+        var cliente = await db.Clientes.FirstOrDefaultAsync(c => c.Id == clienteId && c.Activo, ct)
+                      ?? throw ApiException.NoEncontrado("No existe ese cliente.");
 
-        var servicio = await db.Servicios.AsNoTracking().FirstOrDefaultAsync(s => s.Id == r.ServicioId && s.Activo, ct)
+        var titulo = Entrada.Texto(r.Titulo, "titulo", 2, 150);
+        if (r.PrimeraSesion is null)
+            throw ApiException.Validacion("primeraSesion", "Indica la sala y el inicio de la primera sesión.");
+
+        var servicio = await db.Servicios.FirstOrDefaultAsync(s => s.Id == r.ServicioId && s.Activo, ct)
                        ?? throw ApiException.NoEncontrado("No existe ese servicio.");
 
         var tipo = servicio.Categoria switch
@@ -114,8 +116,6 @@ public sealed class ProyectosService(
             _ => throw ApiException.Validacion("servicioId", "Elige la canción completa o un servicio parcial.")
         };
 
-        if (servicio.Precio is not { } precio || precio <= 0)
-            throw ApiException.Conflicto("precio_no_definido", "Ese servicio aún no tiene precio definido.");
         if (servicio.SesionesIncluidas <= 0)
             throw ApiException.Conflicto("servicio_mal_configurado", "El servicio no tiene sesiones incluidas.");
 
@@ -128,78 +128,38 @@ public sealed class ProyectosService(
             var pendientes = await db.Proyectos.CountAsync(p => p.ClienteId == clienteId && p.Estado == EstadoProyecto.Pendiente, ct);
             if (pendientes >= _o.MaxProyectosPendientesPorCliente)
                 throw ApiException.Conflicto("demasiados_pendientes",
-                    $"Ya tienes {pendientes} proyectos sin confirmar. Espera la respuesta de los colaboradores o cancela alguno.");
+                    $"Ya tienes {pendientes} proyectos sin confirmar. Paga o cancela alguno antes de crear otro.");
         }
-
-        var participantes = await ConstruirParticipantesAsync(r.Participantes ?? new List<ParticipanteRequest>(), ahora, ct);
 
         var proyecto = new Proyecto
         {
-            ClienteId = clienteId,
-            ServicioId = servicio.Id,
+            Cliente = cliente,
+            Servicio = servicio,
             Titulo = titulo,
             Tipo = tipo,
             EtapaActual = etapaInicial,
             Estado = EstadoProyecto.Pendiente,
             SesionesIncluidas = servicio.SesionesIncluidas,
-            PrecioAcordado = precio,   // la tarifa puede cambiar después; este proyecto conserva el precio que vio el cliente
             RondaRevision = 0,
             CreadoPor = actor.UsuarioId,
             CreadoEn = ahora,
-            ActualizadoEn = ahora,
-            Participantes = participantes
+            ActualizadoEn = ahora
         };
-        db.Proyectos.Add(proyecto);
+
+        var p1 = r.PrimeraSesion;
+        var pedido = new ProgramarSesionRequest(p1.SalaId, p1.Inicio, null, false, p1.ColaboradorIds);
+
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        // AgregarAsync enlaza la sesión con el proyecto: al guardar se insertan los dos juntos.
+        var sesion = await sesionesSvc.AgregarAsync(proyecto, pedido, esPrimera: true, actor, ctx, ct);
         auditoria.Registrar(actor.UsuarioId, "proyecto_creado", "proyecto", null,
-            new { servicioId = servicio.Id, tipo = tipo.ToString(), clienteId, colaboradores = participantes.Count }, ctx.Ip);
+            new { servicioId = servicio.Id, tipo = tipo.ToString(), clienteId }, ctx.Ip);
         await GuardarAsync(ct);
+        await sesionesSvc.CompletarProgramacionAsync(sesion, actor, ct);
+        await GuardarAsync(ct);
+        await tx.CommitAsync(ct);
 
         return await ObtenerAsync(proyecto.Id, actor, ct);
-    }
-
-    /// <summary>Valida y arma las solicitudes: el colaborador debe estar activo y su perfil debe coincidir con el rol pedido.</summary>
-    private async Task<List<ParticipanteProyecto>> ConstruirParticipantesAsync(
-        IReadOnlyList<ParticipanteRequest> pedidos, DateTimeOffset ahora, CancellationToken ct)
-    {
-        if (pedidos.Count < 1 || pedidos.Count > 10)
-            throw ApiException.Validacion("participantes", "Indica entre 1 y 10 colaboradores (artistas o productores).");
-
-        var ids = pedidos.Select(p => p.ColaboradorId).ToList();
-        if (ids.Distinct().Count() != ids.Count)
-            throw ApiException.Validacion("participantes", "No repitas colaboradores.");
-
-        var colaboradores = await db.Colaboradores.AsNoTracking()
-            .Where(c => ids.Contains(c.Id))
-            .Select(c => new { c.Id, c.Perfil, c.Vinculacion, UsuarioActivo = c.Usuario.Activo })
-            .ToListAsync(ct);
-
-        var lista = new List<ParticipanteProyecto>();
-        foreach (var pedido in pedidos)
-        {
-            var c = colaboradores.FirstOrDefault(x => x.Id == pedido.ColaboradorId)
-                    ?? throw ApiException.Validacion("participantes", "Uno de los colaboradores no existe.");
-            if (c.Vinculacion != EstadoVinculacion.Activo || !c.UsuarioActivo)
-                throw ApiException.Validacion("participantes", "Uno de los colaboradores no está activo.");
-
-            if (!Convenciones.TryParseEnum<RolParticipante>(pedido.Rol, out var rol))
-                throw ApiException.Validacion("participantes", "El rol debe ser artista o productor.");
-
-            var coincide = (rol == RolParticipante.Artista && c.Perfil == PerfilColaborador.Artista)
-                        || (rol == RolParticipante.Productor && c.Perfil == PerfilColaborador.Productor);
-            if (!coincide)
-                throw ApiException.Validacion("participantes",
-                    $"Un colaborador con perfil {Convenciones.Api(c.Perfil)} no puede participar como {Convenciones.Api(rol)}.");
-
-            lista.Add(new ParticipanteProyecto
-            {
-                ColaboradorId = c.Id,
-                Rol = rol,
-                Estado = EstadoParticipacion.Pendiente,
-                EnviadaEn = ahora,
-                VenceEn = ahora.AddHours(_o.ParticipacionHoras)
-            });
-        }
-        return lista;
     }
 
     // ───────────────────────── Consultas ─────────────────────────
@@ -215,9 +175,11 @@ public sealed class ProyectosService(
         {
             var clienteId = yo.ClienteId;
             var colaboradorId = yo.ColaboradorId;
+            var usuarioId = actor.UsuarioId;
             consulta = consulta.Where(p =>
                 (clienteId != null && p.ClienteId == clienteId) ||
-                (colaboradorId != null && p.Participantes.Any(x => x.ColaboradorId == colaboradorId)));
+                (colaboradorId != null && db.Aceptaciones.Any(a =>
+                    a.UsuarioId == usuarioId && a.Rol != null && a.Sesion.ProyectoId == p.Id)));
         }
 
         if (!string.IsNullOrWhiteSpace(estado))
@@ -265,13 +227,9 @@ public sealed class ProyectosService(
 
     public async Task<ProyectoDto> ObtenerAsync(long id, Actor actor, CancellationToken ct)
     {
-        var p = await db.Proyectos.AsNoTracking()
-            .Include(x => x.Cliente)
-            .Include(x => x.Servicio)
-            .Include(x => x.Participantes).ThenInclude(x => x.Colaborador).ThenInclude(c => c.Usuario)
-            .FirstOrDefaultAsync(x => x.Id == id, ct)
-            ?? throw ApiException.NoEncontrado("No existe ese proyecto.");
-
+        await LiberarVencidosAsync(ct);
+        // Con seguimiento: así EF enlaza solo sesion.Proyecto (con su Servicio y Cliente) al cargar las sesiones.
+        var p = await CargarAsync(id, ct);
         var yo = await AccesoAsync(p, actor, ct);
         return await ConstruirAsync(p, yo, ct);
     }
@@ -279,142 +237,120 @@ public sealed class ProyectosService(
     private async Task<ProyectoDto> ConstruirAsync(Proyecto p, Identidad yo, CancellationToken ct)
     {
         var ahora = time.GetUtcNow();
-        var nombres = ReglasProyecto.Nombres(p, yo.EsAdmin);
+        var dueno = EsDueno(p, yo);
+        var verDinero = yo.EsAdmin || dueno;
 
-        var sesiones = await db.Sesiones.AsNoTracking()
+        var sesiones = await db.Sesiones
             .Include(s => s.Sala)
             .Include(s => s.Aceptaciones)
             .Where(s => s.ProyectoId == p.Id)
             .OrderBy(s => s.Inicio)
             .ToListAsync(ct);
 
-        var ordenes = await db.Ordenes.AsNoTracking()
-            .Where(o => o.ProyectoId == p.Id)
-            .OrderByDescending(o => o.Id)
-            .ToListAsync(ct);
+        var sesionesDto = await vistas.ConstruirAsync(sesiones, yo, dueno, ct);
+
+        var ordenesDto = new List<OrdenProyectoDto>();
+        TotalesProyectoDto? totales = null;
+        if (verDinero)
+        {
+            var ordenes = await db.Ordenes.AsNoTracking()
+                .Where(o => o.ProyectoId == p.Id)
+                .OrderByDescending(o => o.Id)
+                .ToListAsync(ct);
+
+            // Mientras un cobro está pendiente sigue las tarifas de hoy (no se congela); al pagarse queda fijo.
+            var montos = await precios.MontosAsync(sesiones, ct);
+            decimal MontoVisible(Orden o) =>
+                o.Estado == EstadoOrden.Pendiente && o.SesionId is { } sid && montos.TryGetValue(sid, out var m) ? m : o.Monto;
+            EstadoOrden EstadoVisible(Orden o) =>
+                o.Estado == EstadoOrden.Pendiente && o.VenceEn <= ahora ? EstadoOrden.Expirada : o.Estado;
+
+            ordenesDto = ordenes.Select(o => new OrdenProyectoDto(
+                o.Id, o.SesionId, Convenciones.Api(o.Concepto), MontoVisible(o),
+                Convenciones.Api(EstadoVisible(o)), o.VenceEn, o.PagadaEn, o.ReferenciaPago)).ToList();
+
+            var pagado = ordenes.Where(o => o.Estado == EstadoOrden.Pagada).Sum(o => o.Monto);
+            var pendiente = ordenes.Where(o => EstadoVisible(o) == EstadoOrden.Pendiente).Sum(MontoVisible);
+            totales = new TotalesProyectoDto(pagado, pendiente, pagado + pendiente);
+        }
 
         var comentarios = await (
             from c in db.ComentariosRevision.AsNoTracking()
             where c.ProyectoId == p.Id
             join u in db.Usuarios.AsNoTracking() on c.AutorId equals u.Id
             orderby c.Id
-            select new { c.Id, c.Ronda, c.AutorId, u.Nombre, c.Comentario, c.CreadoEn }
+            select new { c.Id, c.Ronda, c.AutorId, u.Nombre, u.Rol, c.Comentario, c.CreadoEn }
         ).ToListAsync(ct);
 
-        var siguiente = ReglasProyecto.Siguiente(p, sesiones);
+        string Autor(Guid autorId, string nombre, RolUsuario rol) =>
+            autorId == p.Cliente.UsuarioId ? p.Cliente.Nombre
+            : rol == RolUsuario.Administrador && !yo.EsAdmin ? "Administración"
+            : nombre;
 
-        var participantes = p.Participantes.OrderBy(x => x.Id).Select(x =>
-        {
-            var vencida = x.Estado == EstadoParticipacion.Pendiente && x.VenceEn <= ahora;
-            return new ParticipanteDto(
-                x.Id, x.ColaboradorId,
-                nombres.TryGetValue(x.Colaborador.UsuarioId, out var n) ? n : "Colaborador",
-                Convenciones.Api(x.Colaborador.Perfil), Convenciones.Api(x.Rol),
-                Convenciones.Api(vencida ? EstadoParticipacion.Expirada : x.Estado),
-                x.EnviadaEn, x.VenceEn, x.RespondidaEn);
-        }).ToList();
+        var siguiente = ReglasProyecto.Siguiente(p, sesiones);
 
         return new ProyectoDto(
             p.Id, p.Titulo, Convenciones.Api(p.Tipo), p.ServicioId, p.Servicio.Nombre, Convenciones.Api(p.Estado),
             p.EtapaActual is null ? null : Convenciones.Api(p.EtapaActual.Value),
-            p.ClienteId, p.Cliente.Nombre, p.PrecioAcordado, p.SesionesIncluidas, ReglasProyecto.Cumplidas(sesiones), p.RondaRevision,
+            p.ClienteId, p.Cliente.Nombre, p.SesionesIncluidas, ReglasProyecto.Cumplidas(sesiones), p.RondaRevision,
             p.AprobadoEn, p.CanceladoEn, p.CreadoEn,
             p.RevisionVenceEn,
             p.Estado == EstadoProyecto.EnRevision && p.RevisionVenceEn is { } venceRevision && venceRevision <= ahora,
             siguiente is { } sig
                 ? new SiguienteSesionDto(sig.Numero is { } numeroSig ? (short?)numeroSig : null, Convenciones.Api(sig.Etapa), sig.EsAjuste)
                 : null,
-            ReglasProyecto.Creditos(ordenes, sesiones),
-            participantes,
-            sesiones.Select(s => ReglasProyecto.MapSesion(s, nombres, ahora)).ToList(),
-            ordenes.Select(o => new OrdenProyectoDto(
-                o.Id, Convenciones.Api(o.Concepto), o.Monto,
-                Convenciones.Api(o.Estado == EstadoOrden.Pendiente && o.VenceEn <= ahora ? EstadoOrden.Expirada : o.Estado),
-                o.VenceEn, o.PagadaEn, o.ReferenciaPago)).ToList(),
+            totales,
+            sesionesDto,
+            ordenesDto,
             comentarios.Select(c => new ComentarioRevisionDto(
-                c.Id, c.Ronda, c.AutorId, nombres.TryGetValue(c.AutorId, out var autor) ? autor : c.Nombre,
-                c.Comentario, c.CreadoEn)).ToList());
+                c.Id, c.Ronda, c.AutorId, Autor(c.AutorId, c.Nombre, c.Rol), c.Comentario, c.CreadoEn)).ToList());
     }
 
-    // ───────────────────────── Participantes y confirmación ─────────────────────────
-
-    /// <summary>Envía la solicitud a otro colaborador (por ejemplo, si uno rechazó o no respondió). Solo antes de confirmar.</summary>
-    public async Task<ProyectoDto> AgregarParticipanteAsync(long id, ParticipanteRequest r, Actor actor, ContextoPeticion ctx, CancellationToken ct)
-    {
-        await LiberarVencidosAsync(ct);
-        var p = await CargarAsync(id, ct);
-        var yo = await AccesoAsync(p, actor, ct);
-        if (!yo.EsAdmin && !EsDueno(p, yo)) throw ApiException.Prohibido("Solo el cliente o el administrador gestionan los participantes.");
-
-        if (p.Estado != EstadoProyecto.Pendiente)
-            throw ApiException.Conflicto("proyecto_confirmado", "Solo se pueden cambiar los participantes mientras el proyecto no esté confirmado.");
-
-        var enPago = await db.Ordenes.AnyAsync(o => o.ProyectoId == id && o.Concepto == ConceptoOrden.Servicio
-            && (o.Estado == EstadoOrden.Pendiente || o.Estado == EstadoOrden.Pagada), ct);
-        if (enPago)
-            throw ApiException.Conflicto("ya_en_pago", "El proyecto ya está esperando el pago; no se pueden agregar participantes.");
-
-        var activos = p.Participantes.Count(x => x.Estado == EstadoParticipacion.Pendiente || x.Estado == EstadoParticipacion.Aceptada);
-        if (activos >= 10) throw ApiException.Conflicto("limite_participantes", "El proyecto ya tiene 10 participantes.");
-
-        if (p.Participantes.Any(x => x.ColaboradorId == r.ColaboradorId &&
-                (x.Estado == EstadoParticipacion.Pendiente || x.Estado == EstadoParticipacion.Aceptada)))
-            throw ApiException.Conflicto("participante_repetido", "Ese colaborador ya participa o tiene una solicitud pendiente.");
-
-        var nuevos = await ConstruirParticipantesAsync([r], time.GetUtcNow(), ct);
-        foreach (var n in nuevos) p.Participantes.Add(n);
-
-        auditoria.Registrar(actor.UsuarioId, "participante_agregado", "proyecto", id.ToString(),
-            new { colaboradorId = r.ColaboradorId, rol = r.Rol }, ctx.Ip);
-        await GuardarAsync(ct);
-        return await ObtenerAsync(id, actor, ct);
-    }
+    // ───────────────────────── Trazabilidad ─────────────────────────
 
     /// <summary>
-    /// Cuando alguien rechazó o no respondió, el cliente decide seguir sin esa persona.
-    /// Con todos los demás aceptados se genera el cobro del servicio (24 h para registrar el pago).
+    /// Todo lo que pasó en el proyecto, del más antiguo al más reciente. Lo ven el cliente dueño, los colaboradores
+    /// invitados y el administrador. Los colaboradores no ven los eventos de cobro. "sistema" = vencimiento automático.
     /// </summary>
-    public async Task<ProyectoDto> ContinuarAsync(long id, Actor actor, ContextoPeticion ctx, CancellationToken ct)
+    public async Task<IReadOnlyList<HistorialEventoDto>> HistorialAsync(long id, Actor actor, CancellationToken ct)
     {
-        await LiberarVencidosAsync(ct);
         var p = await CargarAsync(id, ct);
         var yo = await AccesoAsync(p, actor, ct);
-        if (!yo.EsAdmin && !EsDueno(p, yo)) throw ApiException.Prohibido("Solo el cliente o el administrador pueden continuar el proyecto.");
+        var verDinero = yo.EsAdmin || EsDueno(p, yo);
 
-        if (p.Estado != EstadoProyecto.Pendiente)
-            throw ApiException.Conflicto("proyecto_confirmado", "El proyecto ya no está pendiente.");
+        var consulta = db.ProyectoHistorial.AsNoTracking().Where(h => h.ProyectoId == id);
+        if (!verDinero) consulta = consulta.Where(h => !h.Evento.StartsWith("cobro_"));
+        var filas = await consulta.OrderBy(h => h.Id).ToListAsync(ct);
 
-        var ahora = time.GetUtcNow();
-        if (p.Participantes.Any(x => x.Estado == EstadoParticipacion.Pendiente && x.VenceEn > ahora))
-            throw ApiException.Conflicto("faltan_respuestas", "Aún hay colaboradores que no han respondido.");
-        if (!p.Participantes.Any(x => x.Estado == EstadoParticipacion.Aceptada))
-            throw ApiException.Conflicto("sin_aceptaciones", "Ningún colaborador ha aceptado todavía.");
+        var actores = filas.Where(h => h.ActorId != null).Select(h => h.ActorId!.Value).Distinct().ToList();
+        var usuarios = await db.Usuarios.AsNoTracking()
+            .Where(u => actores.Contains(u.Id))
+            .Select(u => new { u.Id, u.Nombre, u.Rol })
+            .ToListAsync(ct);
+        var personas = await db.PersonasAsync(actores, yo.EsAdmin, ct);
 
-        await CrearOrdenServicioAsync(p, ahora, ct);
-        auditoria.Registrar(actor.UsuarioId, "proyecto_continuado", "proyecto", id.ToString(), null, ctx.Ip);
-        await GuardarAsync(ct);
-        return await ObtenerAsync(id, actor, ct);
-    }
-
-    private async Task CrearOrdenServicioAsync(Proyecto p, DateTimeOffset ahora, CancellationToken ct)
-    {
-        var existe = await db.Ordenes.AnyAsync(o => o.ProyectoId == p.Id && o.Concepto == ConceptoOrden.Servicio
-            && (o.Estado == EstadoOrden.Pendiente || o.Estado == EstadoOrden.Pagada), ct);
-        if (existe) return;
-
-        db.Ordenes.Add(new Orden
+        string Etiqueta(Guid? actorId)
         {
-            Concepto = ConceptoOrden.Servicio,
-            ClienteId = p.ClienteId,
-            ProyectoId = p.Id,
-            Monto = p.PrecioAcordado,   // el precio acordado al crear el proyecto, no la tarifa de hoy
-            Estado = EstadoOrden.Pendiente,
-            VenceEn = ahora.AddHours(_o.PagoServicioHoras),
-            CreadoEn = ahora,
-            ActualizadoEn = ahora
-        });
+            if (actorId is not { } a) return "sistema";
+            if (a == p.Cliente.UsuarioId) return p.Cliente.Nombre;
+            var u = usuarios.FirstOrDefault(x => x.Id == a);
+            if (u is null) return "Usuario";
+            if (u.Rol == RolUsuario.Administrador) return yo.EsAdmin ? u.Nombre : "Administración";
+            return personas.TryGetValue(a, out var per) ? per.Nombre : (yo.EsAdmin ? u.Nombre : "Colaborador");
+        }
+
+        return filas.Select(h =>
+        {
+            JsonElement detalle;
+            try { using var doc = JsonDocument.Parse(h.Detalle); detalle = doc.RootElement.Clone(); }
+            catch (JsonException) { using var doc = JsonDocument.Parse("{}"); detalle = doc.RootElement.Clone(); }
+            return new HistorialEventoDto(h.Id, h.SesionId, h.Evento, h.EstadoAnterior, h.EstadoNuevo, detalle, Etiqueta(h.ActorId), h.CreadoEn);
+        }).ToList();
     }
 
+    // ───────────────────────── Cancelar ─────────────────────────
+
+    /// <summary>Solo mientras el proyecto está pendiente (primera sesión sin pagar). Cancela también su sesión, invitaciones y cobro.</summary>
     public async Task<ProyectoDto> CancelarAsync(long id, Actor actor, ContextoPeticion ctx, CancellationToken ct)
     {
         await LiberarVencidosAsync(ct);
@@ -426,109 +362,28 @@ public sealed class ProyectosService(
             throw ApiException.Conflicto("proyecto_confirmado", "Un proyecto confirmado ya no se puede cancelar.");
 
         var ahora = time.GetUtcNow();
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+
+        var abiertas = await db.Sesiones.Include(s => s.Aceptaciones)
+            .Where(s => s.ProyectoId == id && (s.Estado == EstadoSesion.PendienteAceptacion || s.Estado == EstadoSesion.PendientePago))
+            .ToListAsync(ct);
+        foreach (var s in abiertas)
+        {
+            s.Estado = EstadoSesion.Cancelada;
+            foreach (var a in s.Aceptaciones.Where(a => a.Estado == EstadoParticipacion.Pendiente))
+                a.Estado = EstadoParticipacion.Expirada;
+        }
+        var pendientes = await db.Ordenes.Where(o => o.ProyectoId == id && o.Estado == EstadoOrden.Pendiente).ToListAsync(ct);
+        foreach (var o in pendientes) o.Estado = EstadoOrden.Expirada;
+        await GuardarAsync(ct);
+
         p.Estado = EstadoProyecto.Cancelado;
         p.CanceladoEn = ahora;
         p.ActualizadoEn = ahora;
-
-        foreach (var pendiente in p.Participantes.Where(x => x.Estado == EstadoParticipacion.Pendiente))
-            pendiente.Estado = EstadoParticipacion.Expirada;
-
-        var pendientes = await db.Ordenes.Where(o => o.ProyectoId == id && o.Estado == EstadoOrden.Pendiente).ToListAsync(ct);
-        foreach (var o in pendientes) o.Estado = EstadoOrden.Expirada;
-
         auditoria.Registrar(actor.UsuarioId, "proyecto_cancelado", "proyecto", id.ToString(), null, ctx.Ip);
         await GuardarAsync(ct);
+        await tx.CommitAsync(ct);
         return await ObtenerAsync(id, actor, ct);
-    }
-
-    // ───────────────────────── Solicitudes a colaboradores ─────────────────────────
-
-    public async Task<PaginaDto<ParticipacionDto>> ListarParticipacionesAsync(Actor actor, string? estado, int pagina, int tamano, CancellationToken ct)
-    {
-        pagina = Math.Max(1, pagina);
-        tamano = Math.Clamp(tamano, 1, 100);
-        var yo = await db.ResolverAsync(actor, ct);
-        var consulta = db.Participantes.AsNoTracking().AsQueryable();
-
-        if (!yo.EsAdmin)
-        {
-            var colaboradorId = yo.ColaboradorId;
-            consulta = consulta.Where(x => colaboradorId != null && x.ColaboradorId == colaboradorId);
-        }
-
-        if (!string.IsNullOrWhiteSpace(estado))
-        {
-            if (!Convenciones.TryParseEnum<EstadoParticipacion>(estado, out var estadoFiltro))
-                throw ApiException.Validacion("estado", "Estado no válido.");
-            consulta = consulta.Where(x => x.Estado == estadoFiltro);
-        }
-
-        var total = await consulta.CountAsync(ct);
-        var filas = await consulta
-            .OrderByDescending(x => x.EnviadaEn).ThenByDescending(x => x.Id)
-            .Skip((pagina - 1) * tamano).Take(tamano)
-            .Select(x => new
-            {
-                x.Id,
-                x.ProyectoId,
-                Proyecto = x.Proyecto.Titulo,
-                Cliente = x.Proyecto.Cliente.Nombre,
-                Servicio = x.Proyecto.Servicio.Nombre,
-                x.Rol,
-                x.Estado,
-                x.EnviadaEn,
-                x.VenceEn,
-                x.RespondidaEn
-            })
-            .ToListAsync(ct);
-
-        var ahora = time.GetUtcNow();
-        var items = filas.Select(f => new ParticipacionDto(
-            f.Id, f.ProyectoId, f.Proyecto, f.Cliente, f.Servicio, Convenciones.Api(f.Rol),
-            Convenciones.Api(f.Estado == EstadoParticipacion.Pendiente && f.VenceEn <= ahora ? EstadoParticipacion.Expirada : f.Estado),
-            f.EnviadaEn, f.VenceEn, f.RespondidaEn)).ToList();
-
-        return new PaginaDto<ParticipacionDto>(items, total, pagina, tamano);
-    }
-
-    public async Task<ProyectoDto> ResponderParticipacionAsync(long participacionId, bool aceptar, Actor actor, ContextoPeticion ctx, CancellationToken ct)
-    {
-        await LiberarVencidosAsync(ct);
-        var yo = await db.ResolverAsync(actor, ct);
-
-        var part = await db.Participantes
-            .Include(x => x.Proyecto).ThenInclude(p => p.Servicio)
-            .Include(x => x.Proyecto).ThenInclude(p => p.Participantes)
-            .FirstOrDefaultAsync(x => x.Id == participacionId, ct)
-            ?? throw ApiException.NoEncontrado("No existe esa solicitud.");
-
-        if (yo.ColaboradorId is not { } mio || mio != part.ColaboradorId)
-            throw ApiException.NoEncontrado("No existe esa solicitud.");
-
-        var ahora = time.GetUtcNow();
-        if (part.Estado != EstadoParticipacion.Pendiente)
-            throw ApiException.Conflicto("ya_respondida", "Esa solicitud ya no está pendiente.");
-        if (part.VenceEn <= ahora)
-            throw ApiException.Conflicto("plazo_vencido", "El plazo de 72 horas para responder venció.");
-        if (part.Proyecto.Estado != EstadoProyecto.Pendiente)
-            throw ApiException.Conflicto("proyecto_no_pendiente", "El proyecto ya no está esperando respuestas.");
-
-        part.Estado = aceptar ? EstadoParticipacion.Aceptada : EstadoParticipacion.Rechazada;
-        part.RespondidaEn = ahora;
-
-        // Todos deben aceptar. Si nadie rechazó ni dejó vencer su solicitud, se genera el cobro de inmediato.
-        // Si hubo rechazos o vencimientos, el cliente decide: enviar a otro colaborador, continuar sin esa persona o cancelar.
-        if (aceptar)
-        {
-            var todos = part.Proyecto.Participantes;
-            var todosAceptaron = todos.Count > 0 && todos.All(x => x.Estado == EstadoParticipacion.Aceptada);
-            if (todosAceptaron) await CrearOrdenServicioAsync(part.Proyecto, ahora, ct);
-        }
-
-        auditoria.Registrar(actor.UsuarioId, aceptar ? "participacion_aceptada" : "participacion_rechazada",
-            "proyecto", part.ProyectoId.ToString(), new { participacionId }, ctx.Ip);
-        await GuardarAsync(ct);
-        return await ObtenerAsync(part.ProyectoId, actor, ct);
     }
 
     // ───────────────────────── Revisión ─────────────────────────
@@ -558,7 +413,7 @@ public sealed class ProyectosService(
 
     /// <summary>
     /// El cliente NO aprueba el trabajo (dentro de sus 24 h) y pide ajustes: se habilita la sesión de ajuste incluida.
-    /// Si esa ya se usó, otra ronda requiere una sesión extra pagada. Los servicios parciales no tienen ajustes.
+    /// Si esa ya se usó, otra ronda requiere una sesión extra (cobrada por hora). Los servicios parciales no tienen ajustes.
     /// El administrador puede hacerlo por el cliente, también después del plazo.
     /// </summary>
     public async Task<ProyectoDto> SolicitarAjustesAsync(long id, string? comentario, Actor actor, ContextoPeticion ctx, CancellationToken ct)
@@ -630,50 +485,6 @@ public sealed class ProyectosService(
             Destinatarios.Colaboradores | Destinatarios.Administradores | (yo.EsAdmin ? Destinatarios.Cliente : Destinatarios.Ninguno),
             "proyecto_aprobado", "Trabajo aprobado",
             $"\"{p.Titulo}\" quedó aprobado y finalizado.", null, ct);
-        await GuardarAsync(ct);
-        return await ObtenerAsync(id, actor, ct);
-    }
-
-    // ───────────────────────── Sesión extra (cobro adicional) ─────────────────────────
-
-    /// <summary>El productor, el cliente o el administrador piden una sesión extra: se genera un cobro de 24 h. Pagado, queda un crédito para programarla.</summary>
-    public async Task<ProyectoDto> SolicitarSesionExtraAsync(long id, Actor actor, ContextoPeticion ctx, CancellationToken ct)
-    {
-        await LiberarVencidosAsync(ct);
-        var p = await CargarAsync(id, ct);
-        var yo = await AccesoAsync(p, actor, ct);
-        if (!yo.EsAdmin && !EsDueno(p, yo) && !EsProductorAceptado(p, yo))
-            throw ApiException.Prohibido("Solo el productor, el cliente o el administrador piden una sesión extra.");
-
-        if (p.Tipo == TipoProyecto.ServicioParcial)
-            throw ApiException.Conflicto("sin_extra_en_parcial", "Las sesiones extra solo aplican a la canción completa.");
-
-        if (p.Estado != EstadoProyecto.Confirmado && p.Estado != EstadoProyecto.EnCurso)
-            throw ApiException.Conflicto("proyecto_no_activo", "Solo se piden sesiones extra mientras el proyecto está en marcha.");
-
-        var pendiente = await db.Ordenes.AnyAsync(o => o.ProyectoId == id && o.Concepto == ConceptoOrden.SesionExtra
-            && o.Estado == EstadoOrden.Pendiente, ct);
-        if (pendiente)
-            throw ApiException.Conflicto("extra_pendiente", "Ya hay un cobro de sesión extra esperando el pago.");
-
-        var servicioExtra = await db.Servicios.AsNoTracking()
-            .FirstOrDefaultAsync(s => s.Categoria == "sesion_extra" && s.Activo, ct);
-        if (servicioExtra?.Precio is not { } precio || precio <= 0)
-            throw ApiException.Conflicto("precio_no_definido", "La sesión extra aún no tiene precio definido.");
-
-        var ahora = time.GetUtcNow();
-        db.Ordenes.Add(new Orden
-        {
-            Concepto = ConceptoOrden.SesionExtra,
-            ClienteId = p.ClienteId,
-            ProyectoId = id,
-            Monto = precio,
-            Estado = EstadoOrden.Pendiente,
-            VenceEn = ahora.AddHours(_o.PagoServicioHoras),
-            CreadoEn = ahora,
-            ActualizadoEn = ahora
-        });
-        auditoria.Registrar(actor.UsuarioId, "sesion_extra_solicitada", "proyecto", id.ToString(), new { monto = precio }, ctx.Ip);
         await GuardarAsync(ct);
         return await ObtenerAsync(id, actor, ct);
     }

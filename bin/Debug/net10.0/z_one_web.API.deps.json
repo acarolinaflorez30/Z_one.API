@@ -8,41 +8,53 @@
     ".NETCoreApp,Version=v10.0": {
       "z_one_web.API/1.0.0": {
         "dependencies": {
-          "AWSSDK.S3": "4.0.104.6",
-          "Microsoft.AspNetCore.Authentication.JwtBearer": "10.0.13",
+          "AWSSDK.S3": "4.1.0.1",
+          "Microsoft.AspNetCore.Authentication.JwtBearer": "10.0.15",
           "Npgsql.EntityFrameworkCore.PostgreSQL": "10.0.3"
         },
         "runtime": {
           "z_one_web.API.dll": {}
         }
       },
-      "AWSSDK.Core/4.0.102.13": {
-        "runtime": {
-          "lib/net8.0/AWSSDK.Core.dll": {
-            "assemblyVersion": "4.0.0.0",
-            "fileVersion": "4.0.102.13"
-          }
-        }
-      },
-      "AWSSDK.S3/4.0.104.6": {
+      "AWSSDK.Core/4.1.1": {
         "dependencies": {
-          "AWSSDK.Core": "4.0.102.13"
+          "AWSSDK.Extensions.Numerics": "4.1.0",
+          "System.IO.Hashing": "11.0.0"
         },
         "runtime": {
-          "lib/net8.0/AWSSDK.S3.dll": {
+          "lib/net10.0/AWSSDK.Core.dll": {
             "assemblyVersion": "4.0.0.0",
-            "fileVersion": "4.0.104.6"
+            "fileVersion": "4.1.1.0"
           }
         }
       },
-      "Microsoft.AspNetCore.Authentication.JwtBearer/10.0.13": {
+      "AWSSDK.Extensions.Numerics/4.1.0": {
+        "runtime": {
+          "lib/net10.0/AWSSDK.Extensions.Numerics.dll": {
+            "assemblyVersion": "4.0.0.0",
+            "fileVersion": "4.1.0.0"
+          }
+        }
+      },
+      "AWSSDK.S3/4.1.0.1": {
+        "dependencies": {
+          "AWSSDK.Core": "4.1.1"
+        },
+        "runtime": {
+          "lib/net10.0/AWSSDK.S3.dll": {
+            "assemblyVersion": "4.0.0.0",
+            "fileVersion": "4.1.0.1"
+          }
+        }
+      },
+      "Microsoft.AspNetCore.Authentication.JwtBearer/10.0.15": {
         "dependencies": {
           "Microsoft.IdentityModel.Protocols.OpenIdConnect": "8.19.2"
         },
         "runtime": {
           "lib/net10.0/Microsoft.AspNetCore.Authentication.JwtBearer.dll": {
-            "assemblyVersion": "10.0.13.0",
-            "fileVersion": "10.0.1326.50504"
+            "assemblyVersion": "10.0.15.0",
+            "fileVersion": "10.0.1526.53008"
           }
         }
       },
@@ -181,6 +193,14 @@
             "fileVersion": "8.19.2.26195"
           }
         }
+      },
+      "System.IO.Hashing/11.0.0": {
+        "runtime": {
+          "lib/net10.0/System.IO.Hashing.dll": {
+            "assemblyVersion": "11.0.0.0",
+            "fileVersion": "11.0.26.53018"
+          }
+        }
       }
     }
   },
@@ -190,26 +210,33 @@
       "serviceable": false,
       "sha512": ""
     },
-    "AWSSDK.Core/4.0.102.13": {
+    "AWSSDK.Core/4.1.1": {
       "type": "package",
       "serviceable": true,
-      "sha512": "sha512-vaYs/kwfB+Lv9PeVKYE4g2mQlzVtHImXLWgfTG8UgeCybUAPkew5kwb8GS6RhuzwvImbolyLHT+IM34WoM9lJg==",
-      "path": "awssdk.core/4.0.102.13",
-      "hashPath": "awssdk.core.4.0.102.13.nupkg.sha512"
+      "sha512": "sha512-MGURtuvtalMXUaRKCTJv4f3XrwLTcZgrIGfthnOt1Qqol6rTtNKoF0ZusQc12+Z7V9e/UsarZ7AXhh8vMIm76A==",
+      "path": "awssdk.core/4.1.1",
+      "hashPath": "awssdk.core.4.1.1.nupkg.sha512"
     },
-    "AWSSDK.S3/4.0.104.6": {
+    "AWSSDK.Extensions.Numerics/4.1.0": {
       "type": "package",
       "serviceable": true,
-      "sha512": "sha512-fSqAOkftU8jKemilzLGZDU0zLEJXHjAemU+8Nd29+sUwRxVK04w6/GY3O4f9S1+JIYwEnHDGcW66VK4AZ2kx6g==",
-      "path": "awssdk.s3/4.0.104.6",
-      "hashPath": "awssdk.s3.4.0.104.6.nupkg.sha512"
+      "sha512": "sha512-hhoiXT1aUyVgIiQbQoqG3L1EEneqXDh2GKyH5izUlO6Rzi9GAAi8S6mlLiVwow23+EGg77zHjdmUi+ia3RSUTg==",
+      "path": "awssdk.extensions.numerics/4.1.0",
+      "hashPath": "awssdk.extensions.numerics.4.1.0.nupkg.sha512"
     },
-    "Microsoft.AspNetCore.Authentication.JwtBearer/10.0.13": {
+    "AWSSDK.S3/4.1.0.1": {
       "type": "package",
       "serviceable": true,
-      "sha512": "sha512-cEPhQWsaUKymSdQ+NB2rF4GnWtjofAcRrzr2aGPzbjSFyeDtIlBzrbX1Qeh/OAHjvdwBe05SbsukoSbz27AD6g==",
-      "path": "microsoft.aspnetcore.authentication.jwtbearer/10.0.13",
-      "hashPath": "microsoft.aspnetcore.authentication.jwtbearer.10.0.13.nupkg.sha512"
+      "sha512": "sha512-ZgNjIc7GwxRvkKbbZVjzEm7Q2H5ZDCAWxsryGahq1/xF292U4UTUEwoiqsSAAPG2kvfmejI1cuVj3VMkKnXJKg==",
+      "path": "awssdk.s3/4.1.0.1",
+      "hashPath": "awssdk.s3.4.1.0.1.nupkg.sha512"
+    },
+    "Microsoft.AspNetCore.Authentication.JwtBearer/10.0.15": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-Y8VbPrQuABpTkMrqO/K2URdfqBBheri/YDcB+sO530arpqsy7vsd/go/YfEP8XaRkACWPQV2gPxedl7dnxp0zg==",
+      "path": "microsoft.aspnetcore.authentication.jwtbearer/10.0.15",
+      "hashPath": "microsoft.aspnetcore.authentication.jwtbearer.10.0.15.nupkg.sha512"
     },
     "Microsoft.Bcl.Cryptography/10.0.2": {
       "type": "package",
@@ -301,6 +328,13 @@
       "sha512": "sha512-gqhDC/icByKEutygpr+OFgAmjwTVowyzFjWB8K0q1ww8uFj5a1BQNL+QvijUl9uhq4p8OdDwcAIrjVC+eC9FVA==",
       "path": "system.identitymodel.tokens.jwt/8.19.2",
       "hashPath": "system.identitymodel.tokens.jwt.8.19.2.nupkg.sha512"
+    },
+    "System.IO.Hashing/11.0.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-U+Bv2qCYt6eONi+arSP0QIp4uTO6os6uceBsqiAwruZ+Wo2HrRhO/0tj38M9URJtS+4DhAtT3ka2TGNFYsnhyQ==",
+      "path": "system.io.hashing/11.0.0",
+      "hashPath": "system.io.hashing.11.0.0.nupkg.sha512"
     }
   }
 }

@@ -5,10 +5,8 @@ using ZOne.Api.Services;
 
 namespace ZOne.Api.Controllers;
 
-/// <summary>
 /// Agenda por rol: cada persona ve lo suyo y el administrador ve todo.
 /// Las sesiones cumplidas (y los alquileres ya realizados) quedan en la vista "historial".
-/// </summary>
 [ApiController]
 [Route("agenda")]
 [Authorize]

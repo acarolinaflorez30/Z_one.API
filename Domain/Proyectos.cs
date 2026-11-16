@@ -6,7 +6,10 @@ public enum EstadoProyecto { Pendiente, Confirmado, EnCurso, EnRevision, Finaliz
 public enum EstadoParticipacion { Pendiente, Aceptada, Rechazada, Expirada }
 public enum RolParticipante { Artista, Productor }
 
-/// <summary>Una canción completa o un servicio parcial que contrata un cliente.</summary>
+/// <summary>
+/// Una canción completa o un servicio parcial que contrata un cliente.
+/// No tiene precio propio: cada sesión se cobra por separado (sala + colaboradores que aceptaron).
+/// </summary>
 public sealed class Proyecto
 {
     public long Id { get; set; }
@@ -17,10 +20,6 @@ public sealed class Proyecto
     public EtapaProyecto? EtapaActual { get; set; }
     public EstadoProyecto Estado { get; set; } = EstadoProyecto.Pendiente;
     public short SesionesIncluidas { get; set; }
-
-    /// <summary>Precio que vio el cliente al pedir el proyecto. No cambia aunque la tarifa se modifique después.</summary>
-    public decimal PrecioAcordado { get; set; }
-
     public short RondaRevision { get; set; }
     public DateTimeOffset? AprobadoEn { get; set; }
     public DateTimeOffset? CanceladoEn { get; set; }
@@ -32,31 +31,19 @@ public sealed class Proyecto
 
     public Cliente Cliente { get; set; } = null!;
     public Servicio Servicio { get; set; } = null!;
-    public List<ParticipanteProyecto> Participantes { get; set; } = [];
 }
 
-/// <summary>Solicitud a un colaborador para participar en un proyecto. Vence a las 72 horas.</summary>
-public sealed class ParticipanteProyecto
-{
-    public long Id { get; set; }
-    public long ProyectoId { get; set; }
-    public Guid ColaboradorId { get; set; }
-    public RolParticipante Rol { get; set; }
-    public EstadoParticipacion Estado { get; set; } = EstadoParticipacion.Pendiente;
-    public DateTimeOffset EnviadaEn { get; set; }
-    public DateTimeOffset VenceEn { get; set; }
-    public DateTimeOffset? RespondidaEn { get; set; }
-
-    public Proyecto Proyecto { get; set; } = null!;
-    public Colaborador Colaborador { get; set; } = null!;
-}
-
-/// <summary>Quién debe aceptar una sesión de proyecto y si ya lo hizo.</summary>
+/// <summary>
+/// Invitación de una sesión (de proyecto o de alquiler) a un colaborador. Vence con la sesión (72 h).
+/// Rol es null solo en filas antiguas, de cuando el cliente también "aceptaba" la sesión: esas no son invitaciones.
+/// </summary>
 public sealed class AceptacionSesion
 {
     public long SesionId { get; set; }
     public Guid UsuarioId { get; set; }
+    public RolParticipante? Rol { get; set; }
     public EstadoParticipacion Estado { get; set; } = EstadoParticipacion.Pendiente;
+    public DateTimeOffset EnviadaEn { get; set; }
     public DateTimeOffset? RespondidaEn { get; set; }
 
     public Sesion Sesion { get; set; } = null!;
@@ -70,5 +57,19 @@ public sealed class ComentarioRevision
     public short Ronda { get; set; }
     public Guid AutorId { get; set; }
     public string Comentario { get; set; } = "";
+    public DateTimeOffset CreadoEn { get; set; }
+}
+
+/// <summary>Trazabilidad del proyecto. Solo se inserta (lo llenan triggers de la base); ActorId null = lo hizo el sistema.</summary>
+public sealed class ProyectoHistorial
+{
+    public long Id { get; set; }
+    public long ProyectoId { get; set; }
+    public long? SesionId { get; set; }
+    public string Evento { get; set; } = "";
+    public string? EstadoAnterior { get; set; }
+    public string? EstadoNuevo { get; set; }
+    public string Detalle { get; set; } = "{}";
+    public Guid? ActorId { get; set; }
     public DateTimeOffset CreadoEn { get; set; }
 }

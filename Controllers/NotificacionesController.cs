@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using ZOne.Api.Dtos;
+using ZOne.Api.Infrastructure;
 using ZOne.Api.Services;
 
 namespace ZOne.Api.Controllers;
@@ -28,6 +29,15 @@ public sealed class NotificacionesController(INotificacionesService servicio) : 
         await servicio.MarcarLeidaAsync(id, UsuarioId, ct);
         return NoContent();
     }
+
+    /// <summary>Si quiero recibir los avisos también por correo.</summary>
+    [HttpGet("preferencias")]
+    public Task<PreferenciasNotificacionDto> Preferencias(CancellationToken ct) =>
+        servicio.ObtenerPreferenciasAsync(UsuarioId, ct);
+
+    [HttpPut("preferencias")]
+    public Task<PreferenciasNotificacionDto> GuardarPreferencias(ActualizarPreferenciasRequest request, CancellationToken ct) =>
+        servicio.GuardarPreferenciasAsync(UsuarioId, request.Correo ?? throw ApiException.Validacion("correo", "Indica true o false."), ct);
 
     [HttpPost("leidas")]
     public async Task<IActionResult> MarcarTodasLeidas(CancellationToken ct)

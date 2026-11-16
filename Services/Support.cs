@@ -79,13 +79,17 @@ public sealed class AuditoriaService(ZOneDbContext db, TimeProvider time) : IAud
 
 public interface IEmailSender
 {
+    /// <summary>Mensaje de texto simple (recuperación de contraseña). Si el envío falla se registra, pero no se lanza error:
+    /// así la respuesta no delata si el correo existe.</summary>
     Task EnviarAsync(string para, string asunto, string cuerpo, CancellationToken ct);
+
+    /// <summary>Mensaje con versión HTML y texto. Lanza excepción si falla, para que la cola reintente.</summary>
+    Task EnviarHtmlAsync(string para, string asunto, string texto, string html, CancellationToken ct);
 }
 
 /// <summary>
-/// Implementación provisional: no envía correos. En desarrollo escribe el mensaje (con el enlace) en el log
+/// No envía correos: se usa cuando Correo:Habilitado es false. En desarrollo escribe el mensaje (con el enlace) en el log
 /// para poder probar la recuperación de contraseña; en producción NO registra el contenido.
-/// Se reemplaza por un proveedor real (SMTP, SendGrid, etc.) cuando se defina.
 /// </summary>
 public sealed class LogEmailSender(ILogger<LogEmailSender> logger, IHostEnvironment env) : IEmailSender
 {
@@ -97,4 +101,7 @@ public sealed class LogEmailSender(ILogger<LogEmailSender> logger, IHostEnvironm
             logger.LogWarning("No hay proveedor de correo configurado: no se envió el mensaje '{Asunto}'.", asunto);
         return Task.CompletedTask;
     }
+
+    public Task EnviarHtmlAsync(string para, string asunto, string texto, string html, CancellationToken ct) =>
+        EnviarAsync(para, asunto, texto, ct);
 }

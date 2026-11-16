@@ -12,27 +12,28 @@ public static class ImagenValidator
 {
     public const int MaxBytes = 1_572_864;   // 1.5 MB
     public const int MaxLado = 6000;         // píxeles por lado
+    public const int MaxBytesGaleria = 5_242_880;   // 5 MB: fotos de alta resolución de las salas
 
     private static readonly byte[] PngFirma = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
     /// <summary>Lee el flujo sin pasar del límite, aunque el cliente mienta sobre el tamaño.</summary>
-    public static async Task<byte[]> LeerAcotadoAsync(Stream origen, CancellationToken ct)
+    public static async Task<byte[]> LeerAcotadoAsync(Stream origen, CancellationToken ct, int maxBytes = MaxBytes)
     {
         using var ms = new MemoryStream();
         var buffer = new byte[16 * 1024];
         int leidos;
         while ((leidos = await origen.ReadAsync(buffer, ct)) > 0)
         {
-            if (ms.Length + leidos > MaxBytes) throw Error("La foto no puede superar 1.5 MB.");
+            if (ms.Length + leidos > maxBytes) throw Error($"La foto no puede superar {maxBytes / 1_048_576.0:0.#} MB.");
             ms.Write(buffer, 0, leidos);
         }
         return ms.ToArray();
     }
 
-    public static ImagenInfo Validar(byte[] b)
+    public static ImagenInfo Validar(byte[] b, int maxBytes = MaxBytes)
     {
         if (b.Length == 0) throw Error("El archivo está vacío.");
-        if (b.Length > MaxBytes) throw Error("La foto no puede superar 1.5 MB.");
+        if (b.Length > maxBytes) throw Error($"La foto no puede superar {maxBytes / 1_048_576.0:0.#} MB.");
 
         string mime, extension;
         (int Ancho, int Alto)? dimensiones;

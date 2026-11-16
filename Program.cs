@@ -4,6 +4,7 @@ using System.Threading.RateLimiting;
 using Amazon.Runtime;
 using Amazon.S3;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -35,6 +36,14 @@ builder.Services.AddOptions<AlquilerOptions>()
 
 builder.Services.AddOptions<ProyectoOptions>()
     .Bind(builder.Configuration.GetSection(ProyectoOptions.Section));
+
+// Recordatorios y avisos de vencimiento automáticos (proceso en segundo plano; se apaga con Avisos:Habilitado=false)
+builder.Services.AddOptions<AvisosOptions>()
+    .Bind(builder.Configuration.GetSection(AvisosOptions.Section))
+    .Validate(o => o.IntervaloMinutos >= 1 && o.MaxPorCiclo >= 1 && o.RetencionDias > 14,
+        "Avisos: IntervaloMinutos y MaxPorCiclo deben ser al menos 1 y RetencionDias mayor a 14.")
+    .ValidateOnStart();
+builder.Services.AddHostedService<AvisosWorker>();
 
 // Base de datos
 var connectionString = builder.Configuration.GetConnectionString("Default")
@@ -88,7 +97,21 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IPasswordHasher, Pbkdf2PasswordHasher>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
 builder.Services.AddSingleton<AuthCookieWriter>();
-builder.Services.AddSingleton<IEmailSender, LogEmailSender>();
+// Correo: con Correo:Habilitado=true se envía por SMTP (cola + proceso en segundo plano); si no, solo se simula en el log.
+builder.Services.AddOptions<CorreoOptions>()
+    .Bind(builder.Configuration.GetSection(CorreoOptions.Section))
+    .Validate(o => !o.Habilitado || (!string.IsNullOrWhiteSpace(o.Host) && !string.IsNullOrWhiteSpace(o.Usuario) && !string.IsNullOrWhiteSpace(o.Clave)),
+        "Correo:Habilitado es true pero faltan Correo:Host, Correo:Usuario o Correo:Clave.")
+    .ValidateOnStart();
+if (builder.Configuration.GetValue<bool>($"{CorreoOptions.Section}:Habilitado"))
+{
+    builder.Services.AddSingleton<IEmailSender, SmtpEmailSender>();
+    builder.Services.AddHostedService<CorreoWorker>();
+}
+else
+{
+    builder.Services.AddSingleton<IEmailSender, LogEmailSender>();
+}
 builder.Services.AddHttpContextAccessor();
 
 builder.Services.AddScoped<ICurrentUser, CurrentUser>();
@@ -98,6 +121,10 @@ builder.Services.AddScoped<IAdminUsuariosService, AdminUsuariosService>();
 builder.Services.AddScoped<IColaboradoresService, ColaboradoresService>();
 builder.Services.AddScoped<IPublicoService, PublicoService>();
 builder.Services.AddScoped<ICatalogoService, CatalogoService>();
+builder.Services.AddScoped<ISalasService, SalasService>();
+builder.Services.AddScoped<IPreciosService, PreciosService>();
+builder.Services.AddScoped<IInvitacionesService, InvitacionesService>();
+builder.Services.AddScoped<SesionVistaBuilder>();
 builder.Services.AddScoped<IAlquileresService, AlquileresService>();
 builder.Services.AddScoped<IProyectosService, ProyectosService>();
 builder.Services.AddScoped<ISesionesProyectoService, SesionesProyectoService>();
@@ -151,7 +178,10 @@ builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationSc
         };
     });
 
-builder.Services.AddAuthorization();
+// Seguridad por defecto: todo endpoint exige sesión salvo los marcados con [AllowAnonymous]
+// (registro, login, recuperación de contraseña, catálogo público y disponibilidad "ocupado").
+builder.Services.AddAuthorization(o =>
+    o.FallbackPolicy = new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build());
 
 // CORS: solo el origen del frontend, con cookies
 var authOpciones = builder.Configuration
@@ -264,12 +294,13 @@ app.UseAuthorization();
 
 app.MapControllers();
 
-// Comprobación básica de salud de la API
+// Comprobación básica de salud de la API (pública, no revela nada interno)
 app.MapGet("/health", () =>
-    Results.Ok(new { status = "ok" }));
+    Results.Ok(new { status = "ok" }))
+    .AllowAnonymous();
 
-// Comprobar la conexión con PostgreSQL
-app.MapGet("/health/db", async (ZOneDbContext db) =>
+// Diagnóstico de base de datos: solo administrador y sin detalles internos en los errores
+app.MapGet("/health/db", async (ZOneDbContext db, ILoggerFactory logs) =>
 {
     try
     {
@@ -290,15 +321,15 @@ app.MapGet("/health/db", async (ZOneDbContext db) =>
     }
     catch (Exception ex)
     {
+        logs.CreateLogger("Health").LogError(ex, "Falló la comprobación de la base de datos.");
         return Results.Problem(
             title: "Error de conexión con la base de datos",
-            detail: ex.Message,
             statusCode: StatusCodes.Status503ServiceUnavailable);
     }
-});
+}).RequireAuthorization(p => p.RequireRole("administrador"));
 
-// Consultar la cantidad de registros de las tablas principales
-app.MapGet("/health/db/tables", async (ZOneDbContext db) =>
+// Cantidad de registros de las tablas principales: solo administrador
+app.MapGet("/health/db/tables", async (ZOneDbContext db, ILoggerFactory logs) =>
 {
     try
     {
@@ -315,12 +346,12 @@ app.MapGet("/health/db/tables", async (ZOneDbContext db) =>
     }
     catch (Exception ex)
     {
+        logs.CreateLogger("Health").LogError(ex, "Falló la consulta de tablas.");
         return Results.Problem(
             title: "Error al consultar las tablas de la base de datos",
-            detail: ex.Message,
             statusCode: StatusCodes.Status503ServiceUnavailable);
     }
-});
+}).RequireAuthorization(p => p.RequireRole("administrador"));
 
 await app.RunAsync();
 return 0;

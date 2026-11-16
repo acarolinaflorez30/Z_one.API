@@ -1,8 +1,10 @@
 ﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using ZOne.Api.Data;
 using ZOne.Api.Domain;
 using ZOne.Api.Dtos;
 using ZOne.Api.Infrastructure;
+using ZOne.Api.Options;
 
 namespace ZOne.Api.Services;
 
@@ -12,8 +14,17 @@ public interface IOrdenesService
     Task<OrdenDto> RegistrarPagoAsync(long id, string? referencia, Actor actor, ContextoPeticion ctx, CancellationToken ct);
 }
 
-/// <summary>Cobros de servicios y sesiones extra. El sistema no cobra: el administrador registra el pago recibido.</summary>
-public sealed class OrdenesService(ZOneDbContext db, IAuditoriaService auditoria, TimeProvider time) : IOrdenesService
+/// <summary>
+/// Cobros de sesiones de proyecto y sesiones extra. El sistema no cobra: el administrador registra el pago recibido.
+/// Mientras está pendiente, el monto sigue las tarifas actuales; al registrar el pago se recalcula y queda fijo.
+/// </summary>
+public sealed class OrdenesService(
+    ZOneDbContext db,
+    IAuditoriaService auditoria,
+    IPreciosService precios,
+    INotificacionesService notificaciones,
+    IOptions<ProyectoOptions> proyectoOpt,
+    TimeProvider time) : IOrdenesService
 {
     private sealed record Fila(
         long Id, ConceptoOrden Concepto, Guid ClienteId, string Cliente, long? ProyectoId, string? Proyecto, long? SesionId,
@@ -27,11 +38,26 @@ public sealed class OrdenesService(ZOneDbContext db, IAuditoriaService auditoria
         select new Fila(o.Id, o.Concepto, o.ClienteId, c.Nombre, o.ProyectoId, p.Titulo, o.SesionId,
             o.Monto, o.Estado, o.VenceEn, o.PagadaEn, o.ReferenciaPago);
 
-    private static OrdenDto Mapear(Fila f, DateTimeOffset ahora)
+    private static OrdenDto Mapear(Fila f, DateTimeOffset ahora, IReadOnlyDictionary<long, decimal> montos)
     {
         var estado = f.Estado == EstadoOrden.Pendiente && f.VenceEn <= ahora ? EstadoOrden.Expirada : f.Estado;
+        // Pendiente: sigue las tarifas actuales. Pagada o vencida: el monto guardado.
+        var monto = estado == EstadoOrden.Pendiente && f.SesionId is { } sid && montos.TryGetValue(sid, out var vivo) ? vivo : f.Monto;
         return new OrdenDto(f.Id, Convenciones.Api(f.Concepto), f.ClienteId, f.Cliente, f.ProyectoId, f.Proyecto, f.SesionId,
-            f.Monto, Convenciones.Api(estado), f.VenceEn, f.PagadaEn, f.Referencia);
+            monto, Convenciones.Api(estado), f.VenceEn, f.PagadaEn, f.Referencia);
+    }
+
+    private async Task<IReadOnlyDictionary<long, decimal>> MontosVivosAsync(IEnumerable<Fila> filas, CancellationToken ct)
+    {
+        var ids = filas.Where(f => f.Estado == EstadoOrden.Pendiente && f.SesionId != null)
+            .Select(f => f.SesionId!.Value).Distinct().ToList();
+        if (ids.Count == 0) return new Dictionary<long, decimal>();
+
+        var sesiones = await db.Sesiones.AsNoTracking()
+            .Include(s => s.Sala).Include(s => s.Aceptaciones)
+            .Where(s => ids.Contains(s.Id))
+            .ToListAsync(ct);
+        return await precios.MontosAsync(sesiones, ct);
     }
 
     public async Task<PaginaDto<OrdenDto>> ListarAsync(
@@ -65,7 +91,8 @@ public sealed class OrdenesService(ZOneDbContext db, IAuditoriaService auditoria
         var total = await consulta.CountAsync(ct);
         var filas = await consulta.OrderByDescending(f => f.Id).Skip((pagina - 1) * tamano).Take(tamano).ToListAsync(ct);
         var ahora = time.GetUtcNow();
-        return new PaginaDto<OrdenDto>(filas.Select(f => Mapear(f, ahora)).ToList(), total, pagina, tamano);
+        var montos = await MontosVivosAsync(filas, ct);
+        return new PaginaDto<OrdenDto>(filas.Select(f => Mapear(f, ahora, montos)).ToList(), total, pagina, tamano);
     }
 
     public async Task<OrdenDto> RegistrarPagoAsync(long id, string? referencia, Actor actor, ContextoPeticion ctx, CancellationToken ct)
@@ -86,25 +113,47 @@ public sealed class OrdenesService(ZOneDbContext db, IAuditoriaService auditoria
         var ahora = time.GetUtcNow();
         if (orden.Estado != EstadoOrden.Pendiente || orden.VenceEn <= ahora)
             throw ApiException.Conflicto("plazo_vencido",
-                "El plazo de 24 horas para registrar el pago venció. Si era un servicio, el proyecto quedó cancelado.");
+                "El plazo para registrar el pago venció y la sesión se liberó. Debe programarse de nuevo.");
 
+        var sesion = await db.Sesiones
+            .Include(s => s.Sala).Include(s => s.Aceptaciones).Include(s => s.Cliente)
+            .FirstOrDefaultAsync(s => s.Id == orden.SesionId, ct)
+            ?? throw ApiException.NoEncontrado("El cobro no tiene sesión.");
+        if (sesion.Estado != EstadoSesion.PendientePago)
+            throw ApiException.Conflicto("sesion_no_pendiente_pago", "La sesión ya no está pendiente de pago.");
+
+        // Los precios no se congelan: se recalcula con las tarifas de hoy (sala + colaboradores que aceptaron) y queda fijo.
+        var cobro = await precios.CobroDeSesionAsync(sesion, esAdmin: true, ct);
+        if (cobro.Total <= 0)
+            throw ApiException.Conflicto("tarifa_no_definida", "No se pudo calcular el cobro: revisa las tarifas.");
+
+        orden.Monto = cobro.Total;
         orden.Estado = EstadoOrden.Pagada;
         orden.PagadaEn = ahora;
         orden.RegistradaPor = actor.UsuarioId;
         orden.ReferenciaPago = referenciaLimpia;
+        orden.ActualizadoEn = ahora;
 
-        // Pagar el servicio es lo que deja el proyecto listo para empezar el trabajo.
-        if (orden.Concepto == ConceptoOrden.Servicio)
+        sesion.Estado = EstadoSesion.Confirmada;
+        sesion.ExpiraEn = null;
+
+        // Pagar la primera sesión es lo que deja el proyecto confirmado.
+        long? proyectoId = orden.ProyectoId;
+        if (proyectoId is { } pid)
         {
-            var proyecto = await db.Proyectos.Include(p => p.Participantes).FirstOrDefaultAsync(p => p.Id == orden.ProyectoId, ct)
-                           ?? throw ApiException.NoEncontrado("El cobro no tiene proyecto.");
-            if (proyecto.Estado != EstadoProyecto.Pendiente)
-                throw ApiException.Conflicto("proyecto_no_pendiente", "El proyecto ya no está pendiente de pago.");
-            if (proyecto.Participantes.Any(x => x.Estado == EstadoParticipacion.Pendiente))
-                throw ApiException.Conflicto("faltan_respuestas", "Aún hay colaboradores sin responder.");
-            proyecto.Estado = EstadoProyecto.Confirmado;
-            proyecto.ActualizadoEn = ahora;
+            var proyecto = await db.Proyectos.FirstOrDefaultAsync(p => p.Id == pid, ct);
+            if (proyecto is { Estado: EstadoProyecto.Pendiente })
+            {
+                proyecto.Estado = EstadoProyecto.Confirmado;
+                proyecto.ActualizadoEn = ahora;
+            }
         }
+
+        var resumen = Textos.Sesion(sesion, proyectoOpt.Value.UtcOffsetHoras);
+        notificaciones.NotificarUsuarios(
+            ReglasProyecto.Invitados(sesion).Where(a => a.Estado == EstadoParticipacion.Aceptada).Select(a => a.UsuarioId)
+                .Append(sesion.Cliente!.UsuarioId),
+            actor.UsuarioId, "sesion_confirmada", "Sesión confirmada", $"Quedó confirmada: {resumen}", proyectoId, sesion.Id);
 
         auditoria.Registrar(actor.UsuarioId, "pago_registrado", "orden", id.ToString(),
             new { orden.Concepto, orden.Monto, referencia = referenciaLimpia }, ctx.Ip);
@@ -113,6 +162,6 @@ public sealed class OrdenesService(ZOneDbContext db, IAuditoriaService auditoria
         catch (DbUpdateException ex) when (ErroresDb.Traducir(ex) is not null) { throw ErroresDb.Traducir(ex)!; }
 
         var fila = await Consulta().FirstAsync(f => f.Id == id, ct);
-        return Mapear(fila, time.GetUtcNow());
+        return Mapear(fila, time.GetUtcNow(), new Dictionary<long, decimal>());
     }
 }

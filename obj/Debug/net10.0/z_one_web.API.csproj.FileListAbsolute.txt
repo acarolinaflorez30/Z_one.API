@@ -44,4 +44,6 @@ C:\Users\ANDREA CAROLINA\OneDrive\Documentos\Ing. Sistemas\Programación Web\z_o
 C:\Users\ANDREA CAROLINA\OneDrive\Documentos\Ing. Sistemas\Programación Web\z_one_web.API\z_one_web.API\bin\Debug\net10.0\Npgsql.dll
 C:\Users\ANDREA CAROLINA\OneDrive\Documentos\Ing. Sistemas\Programación Web\z_one_web.API\z_one_web.API\bin\Debug\net10.0\Npgsql.EntityFrameworkCore.PostgreSQL.dll
 C:\Users\ANDREA CAROLINA\OneDrive\Documentos\Ing. Sistemas\Programación Web\z_one_web.API\z_one_web.API\bin\Debug\net10.0\System.IdentityModel.Tokens.Jwt.dll
-C:\Users\ANDREA CAROLINA\OneDrive\Documentos\Ing. Sistemas\Programación Web\z_one_web.API\z_one_web.API\obj\Debug\net10.0\staticwebassets.upToDateCheck.txt
+C:\Users\ANDREA CAROLINA\OneDrive\Documentos\Ing. Sistemas\Programación Web\z_one_web.API\z_one_web.API\bin\Debug\net10.0\AWSSDK.Extensions.Numerics.dll
+C:\Users\ANDREA CAROLINA\OneDrive\Documentos\Ing. Sistemas\Programación Web\z_one_web.API\z_one_web.API\bin\Debug\net10.0\System.IO.Hashing.dll
+C:\Users\ANDREA CAROLINA\OneDrive\Documentos\Ing. Sistemas\Programación Web\z_one_web.API\z_one_web.API\obj\Debug\net10.0\z_one_web.API.sourcelink.json

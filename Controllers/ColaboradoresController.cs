@@ -21,6 +21,15 @@ public sealed class ColaboradoresController(IColaboradoresService servicio) : Co
         [FromQuery] int pagina = 1, [FromQuery] int tamano = 25, CancellationToken ct = default) =>
         servicio.ListarAsync(perfil, vinculacion, q, pagina, tamano, ct);
 
+    /// <summary>
+    /// Colaboradores que se pueden invitar a una sesión, con sus precios. Solo clientes y administrador (con sesión).
+    /// El filtro perfil es artista o productor.
+    /// </summary>
+    [HttpGet("invitables")]
+    [Authorize(Roles = "cliente,administrador")]
+    public Task<IReadOnlyList<ColaboradorCatalogoDto>> Invitables([FromQuery] string? perfil, CancellationToken ct) =>
+        servicio.ListarInvitablesAsync(perfil, ct);
+
     /// <summary>El perfil del colaborador que inició sesión.</summary>
     [HttpGet("me")]
     public async Task<ColaboradorDto> Me(CancellationToken ct)

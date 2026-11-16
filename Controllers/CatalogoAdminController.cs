@@ -5,7 +5,7 @@ using ZOne.Api.Services;
 
 namespace ZOne.Api.Controllers;
 
-/// <summary>Administración del catálogo. Aquí se cargan los precios, que define otra persona del proyecto.</summary>
+/// <summary>Administración del catálogo. Servicios y historial de precios. Las salas se administran en /admin/salas.</summary>
 [ApiController]
 [Route("admin")]
 [Authorize(Roles = "administrador")]
@@ -13,28 +13,16 @@ public sealed class CatalogoAdminController(ICatalogoService catalogo) : Control
 {
     private Guid AdminId => User.ComoActor().UsuarioId;
 
-    [HttpGet("salas")]
-    public Task<IReadOnlyList<SalaDto>> Salas(CancellationToken ct) =>
-        catalogo.ListarSalasAsync(soloActivas: false, ct);
-
-    [HttpPost("salas")]
-    public async Task<ActionResult<SalaDto>> CrearSala(SalaRequest request, CancellationToken ct) =>
-        StatusCode(StatusCodes.Status201Created, await catalogo.CrearSalaAsync(request, AdminId, this.Contexto(), ct));
-
-    [HttpPut("salas/{id:long}")]
-    public Task<SalaDto> ActualizarSala(long id, SalaRequest request, CancellationToken ct) =>
-        catalogo.ActualizarSalaAsync(id, request, AdminId, this.Contexto(), ct);
-
     [HttpGet("servicios")]
     public Task<IReadOnlyList<ServicioDto>> Servicios(CancellationToken ct) =>
         catalogo.ListarServiciosAsync(soloActivos: false, ct);
 
-    /// <summary>Todos los cambios de tarifa de salas y servicios, del más reciente al más antiguo.</summary>
+    /// <summary>Todos los cambios de tarifa de salas y colaboradores, del más reciente al más antiguo.</summary>
     [HttpGet("precios/historial")]
     public Task<PaginaDto<HistorialPrecioDto>> HistorialPrecios(
-        [FromQuery] string? tabla, [FromQuery] long? registroId,
+        [FromQuery] string? tabla, [FromQuery] long? registroId, [FromQuery] Guid? registroUuid,
         [FromQuery] int pagina = 1, [FromQuery] int tamano = 50, CancellationToken ct = default) =>
-        catalogo.ListarHistorialPreciosAsync(tabla, registroId, pagina, tamano, ct);
+        catalogo.ListarHistorialPreciosAsync(tabla, registroId, registroUuid, pagina, tamano, ct);
 
     [HttpPut("servicios/{id:long}")]
     public Task<ServicioDto> ActualizarServicio(long id, ServicioRequest request, CancellationToken ct) =>

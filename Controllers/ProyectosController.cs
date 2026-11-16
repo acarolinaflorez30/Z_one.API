@@ -7,7 +7,7 @@ using ZOne.Api.Services;
 namespace ZOne.Api.Controllers;
 
 /// Proyectos: una canción completa (4 sesiones + ajuste opcional) o un servicio parcial (1 sesión).
-/// Los crea el cliente o el administrador; los colaboradores invitados los ven y trabajan en ellos.
+/// Solo el cliente y el administrador los crean y programan sus sesiones; los colaboradores responden las invitaciones por sesión.
 [ApiController]
 [Route("proyectos")]
 [Authorize]
@@ -22,6 +22,7 @@ public sealed class ProyectosController(IProyectosService proyectos, ISesionesPr
         [FromQuery] int pagina = 1, [FromQuery] int tamano = 25, CancellationToken ct = default) =>
         proyectos.ListarAsync(Actor, estado, revisionVencida, pagina, tamano, ct);
 
+    /// Crea el proyecto con su primera sesión (sala, inicio y colaboradores a invitar) en una sola petición.
     [HttpPost]
     [Authorize(Roles = "cliente,administrador")]
     [EnableRateLimiting("reservas")]
@@ -31,19 +32,10 @@ public sealed class ProyectosController(IProyectosService proyectos, ISesionesPr
     [HttpGet("{id:long}")]
     public Task<ProyectoDto> Obtener(long id, CancellationToken ct) => proyectos.ObtenerAsync(id, Actor, ct);
 
-    // Colaboradores
-
-    /// Envía la solicitud a otro colaborador (si uno rechazó o no respondió). Solo antes de confirmar
-    [HttpPost("{id:long}/participantes")]
-    [Authorize(Roles = "cliente,administrador")]
-    public Task<ProyectoDto> AgregarParticipante(long id, ParticipanteRequest request, CancellationToken ct) =>
-        proyectos.AgregarParticipanteAsync(id, request, Actor, this.Contexto(), ct);
-
-    /// Continúa con los colaboradores que ya aceptaron (sin quien rechazó o no respondió) y genera el cobro.
-    [HttpPost("{id:long}/continuar")]
-    [Authorize(Roles = "cliente,administrador")]
-    public Task<ProyectoDto> Continuar(long id, CancellationToken ct) =>
-        proyectos.ContinuarAsync(id, Actor, this.Contexto(), ct);
+    /// Trazabilidad del proyecto: quién hizo qué y cuándo. Los eventos automáticos figuran como "sistema".
+    [HttpGet("{id:long}/historial")]
+    public Task<IReadOnlyList<HistorialEventoDto>> Historial(long id, CancellationToken ct) =>
+        proyectos.HistorialAsync(id, Actor, ct);
 
     /// Solo mientras el proyecto no esté confirmado
     [HttpPost("{id:long}/cancelar")]
@@ -70,15 +62,11 @@ public sealed class ProyectosController(IProyectosService proyectos, ISesionesPr
     public Task<ProyectoDto> Aprobar(long id, CancellationToken ct) =>
         proyectos.AprobarAsync(id, Actor, this.Contexto(), ct);
 
-    /// El productor, el cliente o el administrador piden una sesión extra: genera un cobro
-    [HttpPost("{id:long}/sesion-extra")]
-    public Task<ProyectoDto> SolicitarSesionExtra(long id, CancellationToken ct) =>
-        proyectos.SolicitarSesionExtraAsync(id, Actor, this.Contexto(), ct);
-
     // Sesiones del proyecto
 
-    ///Programa la próxima sesión (numerada, o la de ajuste). Los demás involucrados deben aceptarla
+    /// Programa la próxima sesión (numerada, de ajuste o extra). Solo el cliente dueño o el administrador.
     [HttpPost("{id:long}/sesiones")]
+    [Authorize(Roles = "cliente,administrador")]
     [EnableRateLimiting("reservas")]
     public async Task<ActionResult<SesionProyectoDto>> ProgramarSesion(long id, ProgramarSesionRequest request, CancellationToken ct) =>
         StatusCode(StatusCodes.Status201Created, await sesiones.ProgramarAsync(id, request, Actor, this.Contexto(), ct));

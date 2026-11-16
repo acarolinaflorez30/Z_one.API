@@ -19,7 +19,7 @@ public sealed class OrdenesController(IOrdenesService servicio) : ControllerBase
         [FromQuery] int pagina = 1, [FromQuery] int tamano = 25, CancellationToken ct = default) =>
         servicio.ListarAsync(Actor, estado, concepto, proyectoId, pagina, tamano, ct);
 
-    /// <summary>Para servicios y sesiones extra. Los alquileres se pagan en /alquileres/{id}/pago.</summary>
+    /// <summary>Para sesiones de proyecto y sesiones extra (el monto se recalcula al registrar el pago). Los alquileres se pagan en /alquileres/{id}/pago.</summary>
     [HttpPost("{id:long}/pago")]
     [Authorize(Roles = "administrador")]
     public Task<OrdenDto> RegistrarPago(long id, RegistrarPagoRequest request, CancellationToken ct) =>

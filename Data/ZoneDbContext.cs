@@ -8,8 +8,38 @@ namespace ZOne.Api.Data;
 /// Mapea las tablas que ya existen en PostgreSQL (el esquema lo gestionan las migraciones SQL de Supabase).
 /// Los detalles por perfil de colaborador (artistas, productores...) se leen con SQL parametrizado en DetallePerfil.
 /// </summary>
-public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbContext(options)
+public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options, IHttpContextAccessor? accesor = null) : DbContext(options)
 {
+    /// <summary>Quién hace la petición actual (claim "sub"), o null si no hay sesión (login, tareas internas).</summary>
+    private Guid? ActorActual =>
+        Guid.TryParse(accesor?.HttpContext?.User.FindFirst("sub")?.Value, out var id) ? id : null;
+
+    /// <summary>
+    /// Antes de guardar le dice a PostgreSQL quién es el actor (set_config 'zone.actor', solo dentro de la transacción).
+    /// Los triggers del historial del proyecto lo leen para registrar quién hizo cada cambio.
+    /// Sin actor (vencimientos automáticos) el historial queda como "sistema".
+    /// </summary>
+    public override async Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    {
+        if (ActorActual is not { } actor)
+            return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+
+        var propia = Database.CurrentTransaction is null;
+        var tx = propia ? await Database.BeginTransactionAsync(cancellationToken) : null;
+        try
+        {
+            var actorTexto = actor.ToString();
+            await Database.ExecuteSqlAsync($"select set_config('zone.actor', {actorTexto}, true)", cancellationToken);
+            var n = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+            if (tx is not null) await tx.CommitAsync(cancellationToken);
+            return n;
+        }
+        finally
+        {
+            if (tx is not null) await tx.DisposeAsync();
+        }
+    }
+
     public DbSet<Usuario> Usuarios => Set<Usuario>();
     public DbSet<Cliente> Clientes => Set<Cliente>();
     public DbSet<Colaborador> Colaboradores => Set<Colaborador>();
@@ -17,6 +47,7 @@ public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbC
     public DbSet<TokenRecuperacion> TokensRecuperacion => Set<TokenRecuperacion>();
     public DbSet<Auditoria> Auditorias => Set<Auditoria>();
     public DbSet<Sala> Salas => Set<Sala>();
+    public DbSet<SalaMedio> SalaMedios => Set<SalaMedio>();
     public DbSet<Servicio> Servicios => Set<Servicio>();
     public DbSet<ColaboradorProyecto> ColaboradorProyectos => Set<ColaboradorProyecto>();
     public DbSet<ColaboradorNota> ColaboradorNotas => Set<ColaboradorNota>();
@@ -24,10 +55,12 @@ public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbC
     public DbSet<Orden> Ordenes => Set<Orden>();
     public DbSet<Proyecto> Proyectos => Set<Proyecto>();
     public DbSet<HistorialPrecio> HistorialPrecios => Set<HistorialPrecio>();
-    public DbSet<ParticipanteProyecto> Participantes => Set<ParticipanteProyecto>();
+    public DbSet<ProyectoHistorial> ProyectoHistorial => Set<ProyectoHistorial>();
     public DbSet<AceptacionSesion> Aceptaciones => Set<AceptacionSesion>();
     public DbSet<ComentarioRevision> ComentariosRevision => Set<ComentarioRevision>();
     public DbSet<Notificacion> Notificaciones => Set<Notificacion>();
+    public DbSet<CorreoPendiente> CorreosPendientes => Set<CorreoPendiente>();
+    public DbSet<AvisoEnviado> AvisosEnviados => Set<AvisoEnviado>();
 
     protected override void OnModelCreating(ModelBuilder mb)
     {
@@ -85,7 +118,13 @@ public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbC
         });
 
         mb.Entity<HistorialPrecio>(e => { e.ToTable("historial_precios"); e.HasKey(x => x.Id); });
-        mb.Entity<Sala>(e => { e.ToTable("salas"); e.HasKey(x => x.Id); });
+        mb.Entity<Sala>(e =>
+        {
+            e.ToTable("salas");
+            e.HasKey(x => x.Id);
+            e.HasMany(x => x.Medios).WithOne().HasForeignKey(m => m.SalaId);
+        });
+        mb.Entity<SalaMedio>(e => { e.ToTable("sala_medios"); e.HasKey(x => x.Id); });
         mb.Entity<Servicio>(e => { e.ToTable("servicios"); e.HasKey(x => x.Id); });
 
         mb.Entity<ColaboradorProyecto>(e =>
@@ -127,14 +166,14 @@ public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbC
             e.HasKey(x => x.Id);
             e.HasOne(x => x.Cliente).WithMany().HasForeignKey(x => x.ClienteId);
             e.HasOne(x => x.Servicio).WithMany().HasForeignKey(x => x.ServicioId);
-            e.HasMany(x => x.Participantes).WithOne(x => x.Proyecto).HasForeignKey(x => x.ProyectoId);
         });
 
-        mb.Entity<ParticipanteProyecto>(e =>
+        mb.Entity<ProyectoHistorial>(e =>
         {
-            e.ToTable("participantes_proyecto");
+            e.ToTable("proyecto_historial");
             e.HasKey(x => x.Id);
-            e.HasOne(x => x.Colaborador).WithMany().HasForeignKey(x => x.ColaboradorId);
+            e.Property(x => x.Detalle).HasColumnType("jsonb");
+            e.HasOne<Proyecto>().WithMany().HasForeignKey(x => x.ProyectoId);
         });
 
         mb.Entity<AceptacionSesion>(e =>
@@ -151,6 +190,19 @@ public sealed class ZOneDbContext(DbContextOptions<ZOneDbContext> options) : DbC
             e.HasKey(x => x.Id);
             e.HasOne<Proyecto>().WithMany().HasForeignKey(x => x.ProyectoId);
             e.HasOne<Usuario>().WithMany().HasForeignKey(x => x.AutorId);
+        });
+
+        mb.Entity<CorreoPendiente>(e =>
+        {
+            e.ToTable("correos_pendientes");
+            e.HasKey(x => x.Id);
+            e.HasOne<Usuario>().WithMany().HasForeignKey(x => x.UsuarioId);
+        });
+
+        mb.Entity<AvisoEnviado>(e =>
+        {
+            e.ToTable("avisos_enviados");
+            e.HasKey(x => x.Clave);
         });
 
         mb.Entity<Notificacion>(e =>

@@ -1,0 +1,17 @@
+name: Pruebas
+
+# Corre las pruebas automáticas en cada push y en cada pull request (GitHub Actions es gratis en repos públicos
+# y tiene minutos gratis en los privados).
+on:
+  push:
+  pull_request:
+
+jobs:
+  pruebas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet test tests/ZOne.Api.Tests/ZOne.Api.Tests.csproj --verbosity normal
