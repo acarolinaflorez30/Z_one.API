@@ -251,7 +251,7 @@ builder.Services.Configure<ForwardedHeadersOptions>(o =>
     if (builder.Configuration.GetValue<bool>("Proxy:ConfiarEnReenviados"))
     {
         o.KnownProxies.Clear();
-        o.KnownNetworks.Clear();
+        o.KnownIPNetworks.Clear();
     }
 });
 

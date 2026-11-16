@@ -218,8 +218,19 @@ public static class PersonasExtensions
                 f.PrecioHora, f.PrecioSesion));
     }
 
-    /// <summary>¿Participa esta persona en el proyecto como colaborador invitado a alguna de sus sesiones?</summary>
-    public static Task<bool> EsInvitadoAsync(this ZOneDbContext db, long proyectoId, Guid usuarioId, CancellationToken ct) =>
-        db.Aceptaciones.AsNoTracking().AnyAsync(
-            a => a.UsuarioId == usuarioId && a.Rol != null && a.Sesion.ProyectoId == proyectoId, ct);
+    /// <summary>
+    /// ¿Participa esta persona en el proyecto como colaborador invitado a alguna de sus sesiones?
+    /// Solo cuenta con la invitación pendiente o aceptada y con la vinculación activa: quien rechazó, dejó vencer la
+    /// invitación o fue desvinculado ya no ve el proyecto.
+    /// </summary>
+    public static async Task<bool> EsInvitadoAsync(this ZOneDbContext db, long proyectoId, Guid usuarioId, CancellationToken ct)
+    {
+        var vinculado = await db.Colaboradores.AsNoTracking()
+            .AnyAsync(c => c.UsuarioId == usuarioId && c.Vinculacion == EstadoVinculacion.Activo, ct);
+        if (!vinculado) return false;
+
+        return await db.Aceptaciones.AsNoTracking().AnyAsync(
+            a => a.UsuarioId == usuarioId && a.Rol != null && a.Sesion.ProyectoId == proyectoId
+                 && (a.Estado == EstadoParticipacion.Pendiente || a.Estado == EstadoParticipacion.Aceptada), ct);
+    }
 }

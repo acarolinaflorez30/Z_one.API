@@ -422,10 +422,18 @@ public sealed class AlquileresService(
         if (h <= d) throw ApiException.Validacion("hasta", "'hasta' debe ser posterior a 'desde'.");
         if (h - d > TimeSpan.FromDays(31)) throw ApiException.Validacion("hasta", "El rango máximo es de 31 días.");
 
+        // Público: solo se ve lo que viene. Lo ya ocurrido (ocupación histórica) no se expone.
+        var ahora = time.GetUtcNow();
+        var limiteInferior = ahora.AddDays(-1);
+        var limiteSuperior = ahora.AddDays(_o.MaxDiasAnticipacion);
+
         var sala = await db.Salas.AsNoTracking().FirstOrDefaultAsync(s => s.Id == salaId && s.Publicada, ct)
                    ?? throw ApiException.NoEncontrado("No existe esa sala.");
 
-        var ahora = time.GetUtcNow();
+        d = d < limiteInferior ? limiteInferior : d;
+        h = h > limiteSuperior ? limiteSuperior : h;
+        if (h <= d) return new DisponibilidadDto(sala.Id, sala.Nombre, d, d, []);
+
         var filas = await db.Sesiones.AsNoTracking()
             .Where(s => s.SalaId == salaId && s.Inicio < h && s.Fin > d)
             .Where(s => s.Estado == EstadoSesion.Confirmada || s.Estado == EstadoSesion.Cumplida

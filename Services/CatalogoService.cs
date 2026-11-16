@@ -13,7 +13,7 @@ public interface ICatalogoService
     Task<PaginaDto<HistorialPrecioDto>> ListarHistorialPreciosAsync(string? tabla, long? registroId, Guid? registroUuid, int pagina, int tamano, CancellationToken ct);
 }
 
-public sealed class CatalogoService(ZOneDbContext db, IAuditoriaService auditoria, TimeProvider time) : ICatalogoService
+public sealed class CatalogoService(ZOneDbContext db, IAuditoriaService auditoria) : ICatalogoService
 {
     private static ServicioDto Mapear(Servicio s) => new(
         s.Id, s.Codigo, s.Nombre, s.Descripcion, s.Categoria,
