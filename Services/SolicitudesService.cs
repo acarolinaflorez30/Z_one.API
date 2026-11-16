@@ -37,7 +37,9 @@ public sealed class SolicitudesService(ZOneDbContext db, IAuditoriaService audit
     {
         var yo = await db.ResolverAsync(actor, ct);
         if (yo.EsAdmin || EsDueno(s, yo)) return yo;
-        if (yo.ColaboradorId is { } colaboradorId && s.Colaboradores.Any(x => x.ColaboradorId == colaboradorId))
+        if (yo.ColaboradorId is { } colaboradorId
+            && s.Estado != EstadosSolicitud.Solicitada
+            && s.Colaboradores.Any(x => x.ColaboradorId == colaboradorId))
             return yo;
         throw ApiException.NoEncontrado("No existe esa solicitud.");
     }
@@ -218,7 +220,8 @@ public sealed class SolicitudesService(ZOneDbContext db, IAuditoriaService audit
             else
                 consulta = consulta.Where(s =>
                     (clienteId != null && s.ClienteId == clienteId) ||
-                    (colaboradorId != null && s.Colaboradores.Any(x => x.ColaboradorId == colaboradorId)));
+                    (colaboradorId != null && s.Estado != EstadosSolicitud.Solicitada
+                        && s.Colaboradores.Any(x => x.ColaboradorId == colaboradorId)));
         }
 
         if (!string.IsNullOrWhiteSpace(estado))
@@ -372,7 +375,7 @@ public sealed class SolicitudesService(ZOneDbContext db, IAuditoriaService audit
                 throw ApiException.Prohibido("Solo el administrador puede cambiar la solicitud a ese estado.");
         }
 
-        if ((nuevo == EstadosSolicitud.PorAutorizar || nuevo == EstadosSolicitud.PorPagar)
+        if (nuevo == EstadosSolicitud.PorPagar
             && (solicitud.Colaboradores.Count == 0
                 || solicitud.Colaboradores.Any(x => x.Estado != EstadosInvitacion.Aceptada)))
             throw ApiException.Conflicto("invitaciones_pendientes",
@@ -381,6 +384,10 @@ public sealed class SolicitudesService(ZOneDbContext db, IAuditoriaService audit
         var anterior = solicitud.Estado;
         solicitud.Estado = nuevo;
         solicitud.ActualizadoEn = time.GetUtcNow();
+
+        if (nuevo == EstadosSolicitud.Rechazada || nuevo == EstadosSolicitud.Cancelada)
+            foreach (var invitacion in solicitud.Colaboradores.Where(x => x.Estado == EstadosInvitacion.Pendiente))
+                invitacion.Estado = EstadosInvitacion.Rechazada;
 
         auditoria.Registrar(actor.UsuarioId, "solicitud_estado", "solicitud", id.ToString(),
             new { anterior, nuevo }, ctx.Ip);
@@ -403,8 +410,8 @@ public sealed class SolicitudesService(ZOneDbContext db, IAuditoriaService audit
             ?? throw ApiException.NoEncontrado("No existe esa invitación.");
         if (invitacion.Estado != EstadosInvitacion.Pendiente)
             throw ApiException.Conflicto("ya_respondida", "Esa invitación ya fue respondida.");
-        if (solicitud.Estado != EstadosSolicitud.Solicitada)
-            throw ApiException.Conflicto("solicitud_no_pendiente", "La solicitud ya no está esperando respuestas.");
+        if (solicitud.Estado != EstadosSolicitud.PorAutorizar)
+            throw ApiException.Conflicto("solicitud_no_aprobada", "La solicitud aún no está aprobada.");
 
         invitacion.Estado = nuevo;
         solicitud.ActualizadoEn = time.GetUtcNow();
@@ -413,7 +420,7 @@ public sealed class SolicitudesService(ZOneDbContext db, IAuditoriaService audit
         if (solicitud.Colaboradores.All(x => x.Estado != EstadosInvitacion.Pendiente))
         {
             solicitud.Estado = solicitud.Colaboradores.All(x => x.Estado == EstadosInvitacion.Aceptada)
-                ? EstadosSolicitud.PorAutorizar
+                ? EstadosSolicitud.PorPagar
                 : EstadosSolicitud.Rechazada;
         }
 

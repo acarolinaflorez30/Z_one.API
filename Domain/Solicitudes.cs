@@ -22,7 +22,7 @@ public static class EstadosSolicitud
             [Solicitada] = new HashSet<string>(StringComparer.Ordinal)
                 { PorAutorizar, Rechazada, Cancelada },
             [PorAutorizar] = new HashSet<string>(StringComparer.Ordinal)
-                { PorPagar, Confirmada, Rechazada, Cancelada },
+                { PorPagar, Rechazada, Cancelada },
             [PorPagar] = new HashSet<string>(StringComparer.Ordinal)
                 { Confirmada, Cancelada },
             [Confirmada] = new HashSet<string>(StringComparer.Ordinal)
