@@ -88,7 +88,26 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IPasswordHasher, Pbkdf2PasswordHasher>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
 builder.Services.AddSingleton<AuthCookieWriter>();
-builder.Services.AddSingleton<IEmailSender, LogEmailSender>();
+var smtpUsuario = builder.Configuration["Smtp:Usuario"];
+var smtpClave = builder.Configuration["Smtp:Clave"];
+var tieneSmtpUsuario = !string.IsNullOrWhiteSpace(smtpUsuario);
+var tieneSmtpClave = !string.IsNullOrWhiteSpace(smtpClave);
+
+if (tieneSmtpUsuario && tieneSmtpClave)
+{
+    builder.Services.AddSingleton<IEmailSender, SmtpEmailSender>();
+}
+else
+{
+    builder.Services.AddSingleton<IEmailSender, LogEmailSender>();
+
+    if (tieneSmtpUsuario != tieneSmtpClave)
+    {
+        using var loggerFactory = LoggerFactory.Create(logging => logging.AddConsole());
+        loggerFactory.CreateLogger("Startup").LogWarning(
+            "Configuración SMTP incompleta: falta Smtp:Usuario o Smtp:Clave. Se usará LogEmailSender.");
+    }
+}
 builder.Services.AddHttpContextAccessor();
 
 builder.Services.AddScoped<ICurrentUser, CurrentUser>();
