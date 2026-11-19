@@ -6,6 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>ZOne.Api</RootNamespace>
     <UserSecretsId>zone-api-8f3c2b1e</UserSecretsId>
+    <!-- Evita bloqueos de apphost.exe por sincronización de OneDrive. -->
+    <UseAppHost>false</UseAppHost>
   </PropertyGroup>
 
   <ItemGroup>

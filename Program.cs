@@ -18,6 +18,13 @@ using ZOne.Api.Services;
 var builder = WebApplication.CreateBuilder(args);
 
 // Configuración
+if (builder.Environment.IsDevelopment() &&
+    string.IsNullOrWhiteSpace(builder.Configuration["Jwt:SigningKey"]))
+{
+    builder.Configuration["Jwt:SigningKey"] =
+        "Z-One-development-signing-key-change-before-production-2026";
+}
+
 builder.Services.AddOptions<JwtOptions>()
     .Bind(builder.Configuration.GetSection(JwtOptions.Section))
     .Validate(o => o.SigningKey.Length >= 32,
@@ -38,11 +45,15 @@ builder.Services.AddOptions<ProyectoOptions>()
 
 // Base de datos
 var connectionString = builder.Configuration.GetConnectionString("Default")
-    ?? throw new InvalidOperationException(
-        "Falta ConnectionStrings:Default (usa user-secrets o la variable de entorno ConnectionStrings__Default).");
+    ?? "Host=localhost;Port=5432;Database=zone;Username=postgres;Password=postgres;Timeout=3;Command Timeout=8";
 
 builder.Services.AddDbContext<ZOneDbContext>(o => o.UseNpgsql(connectionString, npg =>
 {
+    npg.CommandTimeout(8);
+    npg.EnableRetryOnFailure(
+        maxRetryCount: 2,
+        maxRetryDelay: TimeSpan.FromSeconds(3),
+        errorCodesToAdd: null);
     npg.MapEnum<RolUsuario>("rol_usuario");
     npg.MapEnum<TipoCliente>("tipo_cliente");
     npg.MapEnum<PerfilColaborador>("perfil_colaborador");
@@ -243,7 +254,7 @@ builder.Services.Configure<ForwardedHeadersOptions>(o =>
     if (builder.Configuration.GetValue<bool>("Proxy:ConfiarEnReenviados"))
     {
         o.KnownProxies.Clear();
-        o.KnownNetworks.Clear();
+        o.KnownIPNetworks.Clear();
     }
 });
 
